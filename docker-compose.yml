@@ -1,0 +1,45 @@
+services:
+  bot:
+    build: .
+    container_name: downloader-bot
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_USERS=${ADMIN_USERS}
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/downloader_bot
+      - DOWNLOAD_DIR=/app/downloads
+      - YT_COOKIES_FILE=${YT_COOKIES_FILE:-}
+    volumes:
+      - ./downloads:/app/downloads
+      - ./cookies.txt:/app/cookies.txt:ro
+    networks:
+      - bot-network
+
+  db:
+    image: postgres:17-alpine
+    container_name: downloader-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=downloader_bot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bot-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d downloader_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+
+networks:
+  bot-network:
+    driver: bridge
+
