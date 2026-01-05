@@ -12,21 +12,22 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Рабочая директория
 WORKDIR /app
 
-# Копируем файлы зависимостей
-COPY pyproject.toml uv.lock* ./
+# Копируем зависимости (lockfile создаём внутри образа, т.к. в репозитории его может не быть)
+COPY pyproject.toml ./
 
-# Устанавливаем зависимости
-RUN uv sync --frozen --no-dev --no-install-project
+# Генерируем lock и устанавливаем зависимости
+RUN uv lock && uv sync --frozen --no-dev --no-install-project
 
 # Копируем исходный код
 COPY src/ ./src/
 
-# Устанавливаем проект
-RUN uv sync --frozen --no-dev
-
 # Создаём директорию для загрузок
 RUN mkdir -p /app/downloads
 
+# Используем venv, созданный uv sync
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
+
 # Запуск бота
-CMD ["uv", "run", "python", "-m", "src.main"]
+CMD ["python", "-m", "src.main"]
 
