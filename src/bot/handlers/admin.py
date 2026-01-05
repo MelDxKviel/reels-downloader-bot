@@ -3,8 +3,9 @@
 """
 import logging
 from datetime import datetime, timedelta
+from typing import Optional, Tuple
 
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -16,13 +17,39 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+async def get_user_display_info(bot: Bot, user_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Получает информацию о пользователе через Telegram API.
+    
+    Returns:
+        (full_name, username) - имя и ник, или (None, None) если не удалось получить
+    """
+    try:
+        chat = await bot.get_chat(user_id)
+        full_name = chat.full_name or chat.first_name or None
+        username = chat.username
+        return full_name, username
+    except Exception:
+        return None, None
+
+
+def format_user_info(user_id: int, full_name: Optional[str], username: Optional[str]) -> str:
+    """Форматирует информацию о пользователе для отображения."""
+    parts = [f"<code>{user_id}</code>"]
+    if full_name:
+        parts.append(f"({full_name})")
+    if username:
+        parts.append(f"@{username}")
+    return " ".join(parts)
+
+
 def is_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь администратором."""
     return user_id in ADMIN_USERS
 
 
 @router.message(Command("adduser"))
-async def cmd_adduser(message: Message, db: DatabaseService) -> None:
+async def cmd_adduser(message: Message, db: DatabaseService, bot: Bot) -> None:
     """Добавляет пользователя в список разрешённых."""
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Эта команда доступна только администраторам.")
@@ -45,14 +72,17 @@ async def cmd_adduser(message: Message, db: DatabaseService) -> None:
     
     success = await db.add_user(user_id)
     if success:
-        await message.answer(f"✅ Пользователь <code>{user_id}</code> добавлен!")
+        # Пробуем подтянуть информацию о пользователе
+        full_name, username = await get_user_display_info(bot, user_id)
+        user_info = format_user_info(user_id, full_name, username)
+        await message.answer(f"✅ Пользователь {user_info} добавлен!")
         logger.info(f"Admin {message.from_user.id} added user {user_id}")
     else:
         await message.answer(f"ℹ️ Пользователь <code>{user_id}</code> уже существует.")
 
 
 @router.message(Command("removeuser"))
-async def cmd_removeuser(message: Message, db: DatabaseService) -> None:
+async def cmd_removeuser(message: Message, db: DatabaseService, bot: Bot) -> None:
     """Удаляет пользователя из списка разрешённых."""
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Эта команда доступна только администраторам.")
@@ -75,14 +105,17 @@ async def cmd_removeuser(message: Message, db: DatabaseService) -> None:
     
     success = await db.remove_user(user_id)
     if success:
-        await message.answer(f"✅ Пользователь <code>{user_id}</code> удалён!")
+        # Пробуем подтянуть информацию о пользователе
+        full_name, username = await get_user_display_info(bot, user_id)
+        user_info = format_user_info(user_id, full_name, username)
+        await message.answer(f"✅ Пользователь {user_info} удалён!")
         logger.info(f"Admin {message.from_user.id} removed user {user_id}")
     else:
         await message.answer(f"❌ Пользователь <code>{user_id}</code> не найден.")
 
 
 @router.message(Command("users"))
-async def cmd_users(message: Message, db: DatabaseService) -> None:
+async def cmd_users(message: Message, db: DatabaseService, bot: Bot) -> None:
     """Показывает список разрешённых пользователей."""
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Эта команда доступна только администраторам.")
@@ -98,7 +131,12 @@ async def cmd_users(message: Message, db: DatabaseService) -> None:
     for i, user in enumerate(users, 1):
         status = "✅" if user.is_active else "❌"
         created = user.created_at.strftime("%d.%m.%Y") if user.created_at else "—"
-        lines.append(f"{i}. {status} <code>{user.user_id}</code> (добавлен: {created})")
+        
+        # Подтягиваем актуальную информацию о пользователе
+        full_name, username = await get_user_display_info(bot, user.user_id)
+        user_info = format_user_info(user.user_id, full_name, username)
+        
+        lines.append(f"{i}. {status} {user_info}\n    <i>добавлен: {created}</i>")
     
     await message.answer("\n".join(lines))
 
@@ -143,7 +181,7 @@ async def cmd_stats(message: Message, db: DatabaseService) -> None:
 
 
 @router.message(Command("userstats"))
-async def cmd_userstats(message: Message, db: DatabaseService) -> None:
+async def cmd_userstats(message: Message, db: DatabaseService, bot: Bot) -> None:
     """Показывает статистику по конкретному пользователю."""
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Эта команда доступна только администраторам.")
@@ -171,15 +209,25 @@ async def cmd_userstats(message: Message, db: DatabaseService) -> None:
     
     stats = await db.get_user_stats(user_id)
     
+    # Подтягиваем актуальную информацию о пользователе через Telegram API
+    full_name, username = await get_user_display_info(bot, user_id)
+    
     created = user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else "—"
     last_active = stats.get('last_activity')
     last_active_str = last_active.strftime("%d.%m.%Y %H:%M") if last_active else "—"
     
+    # Формируем блок с информацией о пользователе
+    user_info_lines = [f"🆔 ID: <code>{user_id}</code>"]
+    if full_name:
+        user_info_lines.append(f"👤 Имя: {full_name}")
+    if username:
+        user_info_lines.append(f"📛 Ник: @{username}")
+    user_info_lines.append(f"📅 Добавлен: {created}")
+    user_info_lines.append(f"🕐 Последняя активность: {last_active_str}")
+    
     text = (
         f"📊 <b>Статистика пользователя</b>\n\n"
-        f"🆔 ID: <code>{user_id}</code>\n"
-        f"📅 Добавлен: {created}\n"
-        f"🕐 Последняя активность: {last_active_str}\n\n"
+        + "\n".join(user_info_lines) + "\n\n"
         f"<b>Загрузки:</b>\n"
         f"• Всего: {stats['total_downloads']}\n"
         f"• Успешных: {stats['successful_downloads']}\n"
