@@ -17,7 +17,7 @@ router = Router()
 # Регулярное выражение для поиска URL в тексте
 URL_PATTERN = re.compile(
     r'https?://(?:www\.)?'
-    r'(?:youtube\.com|youtu\.be|instagram\.com|tiktok\.com|vm\.tiktok\.com|twitter\.com|x\.com)'
+    r'(?:youtube\.com|youtu\.be|instagram\.com|tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|twitter\.com|x\.com)'
     r'[^\s<>"\']*',
     re.IGNORECASE
 )
