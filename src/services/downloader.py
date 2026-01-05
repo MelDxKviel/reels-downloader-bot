@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -16,6 +17,8 @@ from typing import Optional, Dict
 import yt_dlp
 
 from src.config import DOWNLOAD_DIR, MAX_FILE_SIZE, YT_COOKIES_FILE
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -132,7 +135,65 @@ class VideoDownloader:
             return 'X/Twitter'
         return 'Unknown'
     
-    def _get_ydl_opts(self, output_path: str) -> dict:
+    def _is_youtube_url(self, url: str) -> bool:
+        url_lower = url.lower()
+        return 'youtube.com' in url_lower or 'youtu.be' in url_lower
+
+    def _looks_like_netscape_cookies_file(self, path: str) -> bool:
+        """
+        Быстрая проверка, что файл похож на cookies в Netscape формате (требуется yt-dlp).
+        Не гарантирует 100% валидность, но отсекает явно неверные файлы.
+        """
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                # Смотрим первые непустые строки
+                for _ in range(15):
+                    line = f.readline()
+                    if not line:
+                        break
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+
+                    lower = stripped.lower()
+                    if lower.startswith("# netscape"):
+                        return True
+
+                    # Комментарии пропускаем
+                    if stripped.startswith("#"):
+                        continue
+
+                    # Типичная строка cookies файла: 7+ полей, разделённых табами
+                    if "\t" in stripped:
+                        parts = stripped.split("\t")
+                        if len(parts) >= 7:
+                            return True
+
+                    # Любой другой контент в первых строках — скорее всего не Netscape формат
+                    break
+        except OSError:
+            return False
+
+        return False
+
+    def _get_youtube_cookiefile(self) -> Optional[str]:
+        """
+        Возвращает путь к cookies для YouTube, если файл существует и похож на Netscape формат.
+        Если формат неверный — просто игнорируем cookies (чтобы не падало скачивание).
+        """
+        if not YT_COOKIES_FILE:
+            return None
+        if not os.path.exists(YT_COOKIES_FILE):
+            return None
+        if not self._looks_like_netscape_cookies_file(YT_COOKIES_FILE):
+            logger.warning(
+                "YT_COOKIES_FILE задан, но файл не похож на Netscape cookies формат — игнорирую: %s",
+                YT_COOKIES_FILE,
+            )
+            return None
+        return YT_COOKIES_FILE
+
+    def _get_ydl_opts(self, output_path: str, url: str) -> dict:
         """Возвращает опции для yt-dlp."""
         # Если ffmpeg не установлен, нельзя склеивать отдельные потоки (video+audio).
         # В этом случае выбираем "одиночный" best MP4 (или best), чтобы скачивание не падало.
@@ -170,9 +231,11 @@ class VideoDownloader:
             'fragment_retries': 3,
         }
         
-        # Добавляем cookies для YouTube (видео 18+)
-        if YT_COOKIES_FILE and os.path.exists(YT_COOKIES_FILE):
-            opts['cookiefile'] = YT_COOKIES_FILE
+        # Cookies используем только для YouTube (видео 18+). Для остальных платформ не трогаем cookies вообще.
+        if self._is_youtube_url(url):
+            cookiefile = self._get_youtube_cookiefile()
+            if cookiefile:
+                opts['cookiefile'] = cookiefile
         
         return opts
     
@@ -201,7 +264,7 @@ class VideoDownloader:
         file_id = str(uuid.uuid4())[:8]
         output_path = str(self.download_dir / f"{file_id}.%(ext)s")
         
-        ydl_opts = self._get_ydl_opts(output_path)
+        ydl_opts = self._get_ydl_opts(output_path, url)
         
         try:
             # Запускаем скачивание в отдельном потоке (yt-dlp синхронный)
@@ -225,88 +288,112 @@ class VideoDownloader:
     
     def _download_sync(self, url: str, ydl_opts: dict) -> DownloadResult:
         """Синхронная функция скачивания для запуска в executor."""
-        downloaded_file_path = None
-        
-        def progress_hook(d):
-            nonlocal downloaded_file_path
-            if d['status'] == 'finished':
-                downloaded_file_path = d.get('filename')
-        
-        # Добавляем хук для получения пути к файлу
-        ydl_opts = ydl_opts.copy()
-        ydl_opts['progress_hooks'] = [progress_hook]
-        
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Скачиваем видео и получаем информацию
-                info = ydl.extract_info(url, download=True)
-                
-                if info is None:
-                    return DownloadResult(
-                        success=False,
-                        error="Не удалось получить информацию о видео"
-                    )
-                
-                # Проверяем, это плейлист или одно видео
-                if 'entries' in info:
-                    # Берём первое видео из плейлиста
-                    info = info['entries'][0]
+            def attempt_download(opts: dict) -> DownloadResult:
+                downloaded_file_path = None
+
+                def progress_hook(d):
+                    nonlocal downloaded_file_path
+                    if d.get('status') == 'finished':
+                        downloaded_file_path = d.get('filename')
+
+                # Добавляем хук для получения пути к файлу
+                opts = opts.copy()
+                opts['progress_hooks'] = [progress_hook]
+
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    # Скачиваем видео и получаем информацию
+                    info = ydl.extract_info(url, download=True)
+
                     if info is None:
                         return DownloadResult(
                             success=False,
-                            error="Не удалось получить видео из плейлиста"
+                            error="Не удалось получить информацию о видео"
                         )
-                
-                title = info.get('title', 'Видео')
-                duration = info.get('duration')
-                
-                # Получаем путь к файлу из info или из хука
-                if not downloaded_file_path:
-                    # Пробуем получить путь из prepare_filename
-                    downloaded_file_path = ydl.prepare_filename(info)
-                    # Меняем расширение на mp4 если было merge
-                    if downloaded_file_path and not os.path.exists(downloaded_file_path):
-                        base = os.path.splitext(downloaded_file_path)[0]
-                        for ext in ['mp4', 'webm', 'mkv', 'mov']:
-                            test_path = f"{base}.{ext}"
-                            if os.path.exists(test_path):
-                                downloaded_file_path = test_path
-                                break
-                
-                if downloaded_file_path and os.path.exists(downloaded_file_path):
-                    # Проверяем размер скачанного файла
-                    actual_size = os.path.getsize(downloaded_file_path)
-                    if actual_size > MAX_FILE_SIZE:
-                        os.remove(downloaded_file_path)
-                        return DownloadResult(
-                            success=False,
-                            error=f"Скачанный файл слишком большой ({actual_size // (1024*1024)}MB). Максимум: {MAX_FILE_SIZE // (1024*1024)}MB"
-                        )
-                    
-                    return DownloadResult(
-                        success=True,
-                        file_path=downloaded_file_path,
-                        title=title,
-                        duration=duration
-                    )
-                else:
-                    # Fallback: ищем файл вручную
-                    file_id = os.path.basename(ydl_opts['outtmpl']).split('.')[0]
-                    found_file = self._find_downloaded_file(file_id)
-                    if found_file:
+
+                    # Проверяем, это плейлист или одно видео
+                    if 'entries' in info:
+                        # Берём первое видео из плейлиста
+                        info = info['entries'][0]
+                        if info is None:
+                            return DownloadResult(
+                                success=False,
+                                error="Не удалось получить видео из плейлиста"
+                            )
+
+                    title = info.get('title', 'Видео')
+                    duration = info.get('duration')
+
+                    # Получаем путь к файлу из info или из хука
+                    if not downloaded_file_path:
+                        # Пробуем получить путь из prepare_filename
+                        downloaded_file_path = ydl.prepare_filename(info)
+                        # Меняем расширение на mp4 если было merge
+                        if downloaded_file_path and not os.path.exists(downloaded_file_path):
+                            base = os.path.splitext(downloaded_file_path)[0]
+                            for ext in ['mp4', 'webm', 'mkv', 'mov']:
+                                test_path = f"{base}.{ext}"
+                                if os.path.exists(test_path):
+                                    downloaded_file_path = test_path
+                                    break
+
+                    if downloaded_file_path and os.path.exists(downloaded_file_path):
+                        # Проверяем размер скачанного файла
+                        actual_size = os.path.getsize(downloaded_file_path)
+                        if actual_size > MAX_FILE_SIZE:
+                            os.remove(downloaded_file_path)
+                            return DownloadResult(
+                                success=False,
+                                error=f"Скачанный файл слишком большой ({actual_size // (1024*1024)}MB). Максимум: {MAX_FILE_SIZE // (1024*1024)}MB"
+                            )
+
                         return DownloadResult(
                             success=True,
-                            file_path=found_file,
+                            file_path=downloaded_file_path,
                             title=title,
                             duration=duration
                         )
-                    return DownloadResult(
-                        success=False,
-                        error="Файл не был скачан"
-                    )
+                    else:
+                        # Fallback: ищем файл вручную
+                        file_id = os.path.basename(opts['outtmpl']).split('.')[0]
+                        found_file = self._find_downloaded_file(file_id)
+                        if found_file:
+                            return DownloadResult(
+                                success=True,
+                                file_path=found_file,
+                                title=title,
+                                duration=duration
+                            )
+                        return DownloadResult(
+                            success=False,
+                            error="Файл не был скачан"
+                        )
+
+            return attempt_download(ydl_opts)
                     
         except yt_dlp.utils.DownloadError as e:
             error_msg = str(e)
+            error_msg_lower = error_msg.lower()
+
+            # Если cookies файл некорректный — не падаем, а пробуем скачать без cookies.
+            if ydl_opts.get('cookiefile') and (
+                'does not look like a netscape format cookies file' in error_msg_lower
+                or 'netscape format cookies file' in error_msg_lower
+            ):
+                bad_cookiefile = ydl_opts.get('cookiefile')
+                logger.warning(
+                    "yt-dlp отклонил cookies файл (%s). Повторяю скачивание без cookies.",
+                    bad_cookiefile,
+                )
+                ydl_opts_no_cookies = ydl_opts.copy()
+                ydl_opts_no_cookies.pop('cookiefile', None)
+                try:
+                    return attempt_download(ydl_opts_no_cookies)
+                except yt_dlp.utils.DownloadError as e2:
+                    e = e2
+                    error_msg = str(e2)
+                    error_msg_lower = error_msg.lower()
+
             if 'ffmpeg is not installed' in error_msg.lower():
                 return DownloadResult(
                     success=False,
@@ -319,7 +406,7 @@ class VideoDownloader:
                 return DownloadResult(success=False, error="Видео недоступно")
             elif 'Private video' in error_msg:
                 return DownloadResult(success=False, error="Это приватное видео")
-            elif 'Sign in' in error_msg or 'login' in error_msg.lower():
+            elif 'Sign in' in error_msg or 'login' in error_msg_lower:
                 return DownloadResult(success=False, error="Требуется авторизация для просмотра этого видео")
             else:
                 return DownloadResult(success=False, error=f"Ошибка скачивания: {error_msg[:200]}")
