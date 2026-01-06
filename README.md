@@ -18,7 +18,7 @@ Telegram-бот для скачивания видео по ссылке (YouTub
 
 ## Конфигурация
 
-Перед запуском создайте файл окружения (можно на основе `.env.example`) и заполните переменные:
+Перед запуском создайте файл окружения (можно на основе `env.example`) и заполните переменные:
 
 - **BOT_TOKEN**: токен бота из BotFather
 - **ADMIN_USERS**: список Telegram user_id администраторов через запятую
@@ -26,6 +26,7 @@ Telegram-бот для скачивания видео по ссылке (YouTub
 - **POSTGRES_PASSWORD**: пароль PostgreSQL (используется в Docker Compose)
 - **DOWNLOAD_DIR**: директория для загруженных файлов (по умолчанию `downloads`)
 - **YT_COOKIES_FILE**: путь к файлу cookies для YouTube (для видео 18+)
+- **YT_COOKIES_FILE_HOST_PATH**: (только для Docker Compose) путь к cookies-файлу на хосте, который будет смонтирован в контейнер как `/app/cookies.txt`
 
 Важно:
 - Если `ADMIN_USERS` пустой — админ-команды будут недоступны.
@@ -42,7 +43,7 @@ Telegram-бот для скачивания видео по ссылке (YouTub
 
 ## Запуск (Docker Compose)
 
-1) Заполните `.env` (как минимум `BOT_TOKEN`, `ADMIN_USERS`, при необходимости `POSTGRES_PASSWORD`).  
+1) Заполните `.env` (можно на основе `env.example`; как минимум `BOT_TOKEN`, `ADMIN_USERS`, при необходимости `POSTGRES_PASSWORD`).  
 2) Запустите сервисы: `docker compose up -d`  
 3) Логи бота: `docker compose logs -f bot`
 
@@ -74,9 +75,15 @@ Telegram-бот для скачивания видео по ссылке (YouTub
 1. Установите расширение для браузера (например, «Get cookies.txt LOCALLY» для Chrome).
 2. Войдите в свой YouTube-аккаунт.
 3. Откройте любую страницу YouTube и экспортируйте cookies в файл `cookies.txt`.
-4. Поместите файл `cookies.txt` в корень проекта.
-5. Укажите путь в переменной `YT_COOKIES_FILE`:
-   - Для Docker: `YT_COOKIES_FILE=/app/cookies.txt`
-   - Для локального запуска: `YT_COOKIES_FILE=./cookies.txt`
+4. Укажите путь в переменных окружения:
+   - Для Docker Compose:
+     - `YT_COOKIES_FILE=/app/cookies.txt`
+     - `YT_COOKIES_FILE_HOST_PATH=ПУТЬ_НА_ХОСТЕ_ДО_cookies.txt` (по умолчанию `./cookies.txt`)
+   - Для локального запуска:
+     - `YT_COOKIES_FILE=ПУТЬ_НА_ХОСТЕ_ДО_cookies.txt`
+
+Примеры:
+- Docker Compose (Windows): `YT_COOKIES_FILE_HOST_PATH=C:\Users\me\Downloads\cookies.txt`
+- Локально (Windows): `YT_COOKIES_FILE=C:\Users\me\Downloads\cookies.txt`
 
 Cookies могут истекать со временем — при ошибках авторизации повторите экспорт.

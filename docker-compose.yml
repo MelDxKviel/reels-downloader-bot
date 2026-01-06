@@ -14,7 +14,9 @@ services:
       - YT_COOKIES_FILE=${YT_COOKIES_FILE:-}
     volumes:
       - ./downloads:/app/downloads
-      - ./cookies.txt:/app/cookies.txt:ro
+      # Путь к cookies.txt на хосте можно задать через переменную окружения
+      # (удобно для Docker на Windows, когда файл лежит вне репозитория).
+      - ${YT_COOKIES_FILE_HOST_PATH:-./cookies.txt}:/app/cookies.txt:ro
     networks:
       - bot-network
 
