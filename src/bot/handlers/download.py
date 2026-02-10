@@ -17,7 +17,7 @@ router = Router()
 # Регулярное выражение для поиска URL в тексте
 URL_PATTERN = re.compile(
     r'https?://(?:www\.)?'
-    r'(?:youtube\.com|youtu\.be|instagram\.com|tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|twitter\.com|x\.com)'
+    r'(?:youtube\.com|youtu\.be|instagram\.com|kkinstagram\.com|tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|twitter\.com|x\.com)'
     r'[^\s<>"\']*',
     re.IGNORECASE
 )
@@ -33,7 +33,7 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
     
     if not match:
         # Проверяем, похоже ли сообщение на ссылку
-        if any(domain in text.lower() for domain in ['youtube', 'instagram', 'tiktok', 'twitter', 'x.com']):
+        if any(domain in text.lower() for domain in ['youtube', 'instagram', 'kkinstagram', 'tiktok', 'twitter', 'x.com']):
             await message.answer(
                 "🤔 Похоже, вы хотели отправить ссылку, но она некорректна.\n"
                 "Пожалуйста, скопируйте полную ссылку на видео."

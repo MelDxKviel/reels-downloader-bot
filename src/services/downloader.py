@@ -13,8 +13,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict
+from urllib.parse import urlparse, urlunparse
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
 from src.config import DOWNLOAD_DIR, MAX_FILE_SIZE, YT_COOKIES_FILE
 
@@ -46,6 +48,17 @@ class VideoDownloader:
         # X/Twitter
         r'(twitter\.com|x\.com)',
     ]
+    INSTAGRAM_AUTH_ERROR_MARKERS = (
+        'sign in',
+        'login',
+        'login_required',
+        'requires authentication',
+        'authentication required',
+        'not logged in',
+        'consent_required',
+        'checkpoint_required',
+    )
+    TELEGRAM_BOT_USER_AGENT = 'TelegramBot (like TwitterBot)'
     
     def __init__(self, download_dir: str = DOWNLOAD_DIR):
         self.download_dir = Path(download_dir)
@@ -141,6 +154,25 @@ class VideoDownloader:
     def _is_youtube_url(self, url: str) -> bool:
         url_lower = url.lower()
         return 'youtube.com' in url_lower or 'youtu.be' in url_lower
+
+    def _is_instagram_url(self, url: str) -> bool:
+        host = (urlparse(url).hostname or '').lower()
+        return host == 'instagram.com' or host.endswith('.instagram.com')
+
+    def _is_kkinstagram_url(self, url: str) -> bool:
+        host = (urlparse(url).hostname or '').lower()
+        return host == 'kkinstagram.com' or host.endswith('.kkinstagram.com')
+
+    def _build_kkinstagram_url(self, url: str) -> Optional[str]:
+        if not self._is_instagram_url(url):
+            return None
+        parsed = urlparse(url)
+        return urlunparse(parsed._replace(netloc='kkinstagram.com'))
+
+    def _should_retry_with_kkinstagram(self, url: str, error_msg_lower: str) -> bool:
+        if self._is_kkinstagram_url(url) or not self._is_instagram_url(url):
+            return False
+        return any(marker in error_msg_lower for marker in self.INSTAGRAM_AUTH_ERROR_MARKERS)
 
     def _looks_like_netscape_cookies_file(self, path: str) -> bool:
         """
@@ -291,118 +323,118 @@ class VideoDownloader:
     
     def _download_sync(self, url: str, ydl_opts: dict) -> DownloadResult:
         """Синхронная функция скачивания для запуска в executor."""
-        try:
-            def attempt_download(opts: dict) -> DownloadResult:
-                downloaded_file_path = None
+        def attempt_download(download_url: str, opts: dict) -> DownloadResult:
+            downloaded_file_path = None
 
-                def progress_hook(d):
-                    nonlocal downloaded_file_path
-                    if d.get('status') == 'finished':
-                        # Убеждаемся, что filename — строка, а не dict
-                        filename = d.get('filename')
-                        if isinstance(filename, str):
-                            downloaded_file_path = filename
+            def progress_hook(d):
+                nonlocal downloaded_file_path
+                if d.get('status') == 'finished':
+                    # Убеждаемся, что filename — строка, а не dict
+                    filename = d.get('filename')
+                    if isinstance(filename, str):
+                        downloaded_file_path = filename
 
-                # Добавляем хук для получения пути к файлу
-                opts = opts.copy()
-                opts['progress_hooks'] = [progress_hook]
+            # Добавляем хук для получения пути к файлу
+            opts = opts.copy()
+            opts['progress_hooks'] = [progress_hook]
 
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    # Скачиваем видео и получаем информацию
-                    info = ydl.extract_info(url, download=True)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                # Скачиваем видео и получаем информацию
+                info = ydl.extract_info(download_url, download=True)
 
-                    if info is None:
+                if info is None:
+                    return DownloadResult(
+                        success=False,
+                        error="Не удалось получить информацию о видео"
+                    )
+
+                # Логируем структуру для отладки
+                logger.debug("yt-dlp info type: %s, keys: %s", type(info).__name__,
+                             list(info.keys()) if isinstance(info, dict) else "N/A")
+
+                # Проверяем, это плейлист или одно видео
+                # Для Instagram/X entries может быть вложенным
+                if 'entries' in info and info['entries']:
+                    entries = info['entries']
+                    logger.debug("entries type: %s, len: %s", type(entries).__name__,
+                                 len(entries) if hasattr(entries, '__len__') else "N/A")
+                    # Пропускаем None-записи (бывает у некоторых экстракторов)
+                    for entry in entries:
+                        if entry is not None and isinstance(entry, dict):
+                            info = entry
+                            break
+                    else:
                         return DownloadResult(
                             success=False,
-                            error="Не удалось получить информацию о видео"
+                            error="Не удалось получить видео из плейлиста"
                         )
 
-                    # Логируем структуру для отладки
-                    logger.debug("yt-dlp info type: %s, keys: %s", type(info).__name__, 
-                                 list(info.keys()) if isinstance(info, dict) else "N/A")
+                title = info.get('title', 'Видео') if isinstance(info, dict) else 'Видео'
+                duration = info.get('duration') if isinstance(info, dict) else None
 
-                    # Проверяем, это плейлист или одно видео
-                    # Для Instagram/X entries может быть вложенным
-                    if 'entries' in info and info['entries']:
-                        entries = info['entries']
-                        logger.debug("entries type: %s, len: %s", type(entries).__name__,
-                                     len(entries) if hasattr(entries, '__len__') else "N/A")
-                        # Пропускаем None-записи (бывает у некоторых экстракторов)
-                        for entry in entries:
-                            if entry is not None and isinstance(entry, dict):
-                                info = entry
+                # Получаем путь к файлу из info или из хука
+                if not downloaded_file_path:
+                    # Пробуем получить путь из prepare_filename
+                    try:
+                        prepared = ydl.prepare_filename(info)
+                        if isinstance(prepared, str):
+                            downloaded_file_path = prepared
+                    except Exception:
+                        pass
+
+                    # Меняем расширение на mp4 если было merge
+                    if downloaded_file_path and isinstance(downloaded_file_path, str) and not os.path.exists(downloaded_file_path):
+                        base = os.path.splitext(downloaded_file_path)[0]
+                        for ext in ['mp4', 'webm', 'mkv', 'mov']:
+                            test_path = f"{base}.{ext}"
+                            if os.path.exists(test_path):
+                                downloaded_file_path = test_path
                                 break
-                        else:
-                            return DownloadResult(
-                                success=False,
-                                error="Не удалось получить видео из плейлиста"
-                            )
 
-                    title = info.get('title', 'Видео') if isinstance(info, dict) else 'Видео'
-                    duration = info.get('duration') if isinstance(info, dict) else None
+                # Проверяем, что путь — строка, перед использованием в os.path
+                if downloaded_file_path and isinstance(downloaded_file_path, str) and os.path.exists(downloaded_file_path):
+                    # Проверяем размер скачанного файла
+                    actual_size = os.path.getsize(downloaded_file_path)
+                    if actual_size > MAX_FILE_SIZE:
+                        os.remove(downloaded_file_path)
+                        return DownloadResult(
+                            success=False,
+                            error=f"Скачанный файл слишком большой ({actual_size // (1024*1024)}MB). Максимум: {MAX_FILE_SIZE // (1024*1024)}MB"
+                        )
 
-                    # Получаем путь к файлу из info или из хука
-                    if not downloaded_file_path:
-                        # Пробуем получить путь из prepare_filename
-                        try:
-                            prepared = ydl.prepare_filename(info)
-                            if isinstance(prepared, str):
-                                downloaded_file_path = prepared
-                        except Exception:
-                            pass
-                        
-                        # Меняем расширение на mp4 если было merge
-                        if downloaded_file_path and isinstance(downloaded_file_path, str) and not os.path.exists(downloaded_file_path):
-                            base = os.path.splitext(downloaded_file_path)[0]
-                            for ext in ['mp4', 'webm', 'mkv', 'mov']:
-                                test_path = f"{base}.{ext}"
-                                if os.path.exists(test_path):
-                                    downloaded_file_path = test_path
-                                    break
+                    return DownloadResult(
+                        success=True,
+                        file_path=downloaded_file_path,
+                        title=title,
+                        duration=duration
+                    )
+                else:
+                    # Fallback: ищем файл вручную
+                    outtmpl = opts.get('outtmpl', '')
+                    if isinstance(outtmpl, dict):
+                        outtmpl = outtmpl.get('default', '')
+                    if isinstance(outtmpl, str) and outtmpl:
+                        file_id = os.path.basename(outtmpl).split('.')[0]
+                    else:
+                        file_id = None
 
-                    # Проверяем, что путь — строка, перед использованием в os.path
-                    if downloaded_file_path and isinstance(downloaded_file_path, str) and os.path.exists(downloaded_file_path):
-                        # Проверяем размер скачанного файла
-                        actual_size = os.path.getsize(downloaded_file_path)
-                        if actual_size > MAX_FILE_SIZE:
-                            os.remove(downloaded_file_path)
-                            return DownloadResult(
-                                success=False,
-                                error=f"Скачанный файл слишком большой ({actual_size // (1024*1024)}MB). Максимум: {MAX_FILE_SIZE // (1024*1024)}MB"
-                            )
-
+                    found_file = self._find_downloaded_file(file_id) if file_id else None
+                    if found_file:
                         return DownloadResult(
                             success=True,
-                            file_path=downloaded_file_path,
+                            file_path=found_file,
                             title=title,
                             duration=duration
                         )
-                    else:
-                        # Fallback: ищем файл вручную
-                        outtmpl = opts.get('outtmpl', '')
-                        if isinstance(outtmpl, dict):
-                            outtmpl = outtmpl.get('default', '')
-                        if isinstance(outtmpl, str) and outtmpl:
-                            file_id = os.path.basename(outtmpl).split('.')[0]
-                        else:
-                            file_id = None
-                        
-                        found_file = self._find_downloaded_file(file_id) if file_id else None
-                        if found_file:
-                            return DownloadResult(
-                                success=True,
-                                file_path=found_file,
-                                title=title,
-                                duration=duration
-                            )
-                        return DownloadResult(
-                            success=False,
-                            error="Файл не был скачан"
-                        )
+                    return DownloadResult(
+                        success=False,
+                        error="Файл не был скачан"
+                    )
 
-            return attempt_download(ydl_opts)
+        try:
+            return attempt_download(url, ydl_opts)
                     
-        except yt_dlp.utils.DownloadError as e:
+        except DownloadError as e:
             error_msg = str(e)
             error_msg_lower = error_msg.lower()
 
@@ -419,11 +451,35 @@ class VideoDownloader:
                 ydl_opts_no_cookies = ydl_opts.copy()
                 ydl_opts_no_cookies.pop('cookiefile', None)
                 try:
-                    return attempt_download(ydl_opts_no_cookies)
-                except yt_dlp.utils.DownloadError as e2:
+                    return attempt_download(url, ydl_opts_no_cookies)
+                except DownloadError as e2:
                     e = e2
                     error_msg = str(e2)
                     error_msg_lower = error_msg.lower()
+
+            if self._should_retry_with_kkinstagram(url, error_msg_lower):
+                kk_url = self._build_kkinstagram_url(url)
+                if kk_url:
+                    logger.warning(
+                        "Instagram требует авторизации. Пробую fallback через kkinstagram: %s",
+                        kk_url,
+                    )
+                    ydl_opts_kk = ydl_opts.copy()
+                    ydl_opts_kk['user_agent'] = self.TELEGRAM_BOT_USER_AGENT
+                    http_headers = ydl_opts_kk.get('http_headers')
+                    if not isinstance(http_headers, dict):
+                        http_headers = {}
+                    ydl_opts_kk['http_headers'] = {
+                        **http_headers,
+                        'User-Agent': self.TELEGRAM_BOT_USER_AGENT,
+                    }
+                    try:
+                        return attempt_download(kk_url, ydl_opts_kk)
+                    except DownloadError as e2:
+                        logger.warning("Fallback через kkinstagram не сработал: %s", e2)
+                        e = e2
+                        error_msg = str(e2)
+                        error_msg_lower = error_msg.lower()
 
             if 'ffmpeg is not installed' in error_msg.lower():
                 return DownloadResult(
