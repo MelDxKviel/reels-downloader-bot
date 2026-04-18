@@ -37,10 +37,10 @@ class DownloadStates(StatesGroup):
     waiting_for_url = State()
 
 
-def _cancel_keyboard() -> InlineKeyboardMarkup:
+def _cancel_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_download")]
+            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_download:{user_id}")]
         ]
     )
 
@@ -116,14 +116,18 @@ async def cmd_download(message: Message, state: FSMContext, db: DatabaseService)
 
     prompt = await message.answer(
         "🔗 Отправьте ссылку на видео с YouTube, Instagram, TikTok или X/Twitter.",
-        reply_markup=_cancel_keyboard(),
+        reply_markup=_cancel_keyboard(message.from_user.id),
     )
     await state.set_state(DownloadStates.waiting_for_url)
     await state.update_data(prompt_message_id=prompt.message_id)
 
 
-@router.callback_query(F.data == "cancel_download")
+@router.callback_query(F.data.startswith("cancel_download:"))
 async def cancel_download(callback: CallbackQuery, state: FSMContext) -> None:
+    owner_id = int(callback.data.split(":")[1])
+    if callback.from_user.id != owner_id:
+        await callback.answer("Это не ваша операция.", show_alert=True)
+        return
     await state.clear()
     await callback.message.edit_text("❌ Загрузка отменена.")
     await callback.answer()
