@@ -1,6 +1,7 @@
 """
 Конфигурация бота для скачивания видео.
 """
+
 import os
 from typing import List, Optional
 
@@ -21,8 +22,7 @@ if _admin_users_env:
 
 # Настройки базы данных
 DATABASE_URL: str = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/downloader_bot"
+    "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/downloader_bot"
 )
 
 # Директория для временного хранения скачанных видео
@@ -37,4 +37,3 @@ DOWNLOAD_TIMEOUT: int = 300  # 5 минут
 # Путь к файлу cookies для YouTube (для видео 18+)
 # Экспортируйте cookies из браузера с помощью расширения "Get cookies.txt"
 YT_COOKIES_FILE: Optional[str] = os.getenv("YT_COOKIES_FILE", None)
-
