@@ -256,7 +256,7 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
             media=InputMediaVideo(
                 media=file_id,
                 supports_streaming=True,
-                caption=result.title or None,
+                caption=None,
             ),
             reply_markup=None,
         )
