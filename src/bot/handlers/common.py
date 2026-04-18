@@ -6,7 +6,7 @@ import os
 
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import LinkPreviewOptions, Message
 
 from src.bot.handlers.admin import is_admin
 from src.services.downloader import downloader
@@ -56,7 +56,7 @@ async def cmd_help(message: Message) -> None:
         text += (
             "\n\n🔐 <b>Вы администратор.</b> Используйте /adminhelp для списка команд управления."
         )
-    await message.answer(text)
+    await message.answer(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 @router.message(Command("id"))
