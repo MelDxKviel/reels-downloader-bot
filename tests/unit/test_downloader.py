@@ -1,7 +1,7 @@
 """
 Tests for VideoDownloader: cache operations, cookie validation, yt-dlp integration.
 """
-import json
+
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -9,8 +9,8 @@ import pytest
 
 from src.services.downloader import DownloadResult, VideoDownloader
 
-
 # ── helpers ──────────────────────────────────────────────────────────────────
+
 
 def make_downloader(tmp_path: Path) -> VideoDownloader:
     return VideoDownloader(str(tmp_path))
@@ -24,6 +24,7 @@ def fake_video(tmp_path: Path, name: str = "video.mp4", size: int = 1024) -> Pat
 
 # ── cache: get / add / invalidation ──────────────────────────────────────────
 
+
 def test_get_from_cache_miss(tmp_path):
     d = make_downloader(tmp_path)
     assert d.get_from_cache("https://youtube.com/watch?v=miss") is None
@@ -34,7 +35,9 @@ def test_add_and_get_from_cache(tmp_path):
     video = fake_video(tmp_path)
     url = "https://youtube.com/watch?v=abc"
 
-    d.add_to_cache(url, DownloadResult(success=True, file_path=str(video), title="T", duration=60.0))
+    d.add_to_cache(
+        url, DownloadResult(success=True, file_path=str(video), title="T", duration=60.0)
+    )
 
     result = d.get_from_cache(url)
     assert result is not None
@@ -52,7 +55,9 @@ def test_cache_entry_normalizes_url(tmp_path):
     base_url = "https://youtube.com/watch?v=abc"
     utm_url = "https://youtube.com/watch?v=abc&utm_source=telegram"
 
-    d.add_to_cache(base_url, DownloadResult(success=True, file_path=str(video), title="T", duration=10.0))
+    d.add_to_cache(
+        base_url, DownloadResult(success=True, file_path=str(video), title="T", duration=10.0)
+    )
 
     assert d.get_from_cache(utm_url) is not None
 
@@ -91,12 +96,15 @@ def test_cache_persists_to_json(tmp_path):
 
 # ── cache: clear ──────────────────────────────────────────────────────────────
 
+
 def test_clear_cache_removes_files_and_entries(tmp_path):
     d = make_downloader(tmp_path)
     files = [fake_video(tmp_path, f"v{i}.mp4") for i in range(3)]
     for i, f in enumerate(files):
-        d.add_to_cache(f"https://youtube.com/watch?v={i}",
-                       DownloadResult(success=True, file_path=str(f), title="T", duration=1.0))
+        d.add_to_cache(
+            f"https://youtube.com/watch?v={i}",
+            DownloadResult(success=True, file_path=str(f), title="T", duration=1.0),
+        )
 
     assert len(d.cache) == 3
     count = d.clear_cache()
@@ -113,6 +121,7 @@ def test_clear_cache_returns_0_when_empty(tmp_path):
 
 
 # ── netscape cookie validation ────────────────────────────────────────────────
+
 
 def test_looks_like_netscape_cookies_with_header(tmp_path):
     f = tmp_path / "cookies.txt"
@@ -142,6 +151,7 @@ def test_looks_like_netscape_cookies_missing_file(tmp_path):
 
 # ── ydl opts ──────────────────────────────────────────────────────────────────
 
+
 def test_get_ydl_opts_no_cookiefile_for_non_youtube(tmp_path):
     d = make_downloader(tmp_path)
     opts = d._get_ydl_opts("out.%(ext)s", "https://www.instagram.com/reel/abc/")
@@ -166,6 +176,7 @@ def test_get_ydl_opts_format_with_ffmpeg(tmp_path):
 
 # ── download: unsupported URL ─────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_download_rejects_unsupported_url(tmp_path):
     d = make_downloader(tmp_path)
@@ -176,13 +187,16 @@ async def test_download_rejects_unsupported_url(tmp_path):
 
 # ── download: cache hit ───────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_download_returns_cached_result(tmp_path):
     d = make_downloader(tmp_path)
     video = fake_video(tmp_path)
     url = "https://youtube.com/watch?v=cached"
 
-    d.add_to_cache(url, DownloadResult(success=True, file_path=str(video), title="Cached", duration=5.0))
+    d.add_to_cache(
+        url, DownloadResult(success=True, file_path=str(video), title="Cached", duration=5.0)
+    )
 
     result = await d.download(url)
     assert result.success
@@ -191,6 +205,7 @@ async def test_download_returns_cached_result(tmp_path):
 
 
 # ── download: successful yt-dlp call ─────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_download_success_via_yt_dlp(tmp_path):
@@ -232,6 +247,7 @@ async def test_download_caches_result_after_success(tmp_path):
 
 
 # ── download: yt-dlp error handling ──────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_download_handles_unavailable_video(tmp_path):

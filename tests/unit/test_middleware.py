@@ -1,6 +1,7 @@
 """
 Tests for DatabaseMiddleware and UserAccessMiddleware.
 """
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -31,6 +32,7 @@ def mock_db():
 
 # ── DatabaseMiddleware ────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_database_middleware_injects_db(handler, mock_db):
     middleware = DatabaseMiddleware(mock_db)
@@ -44,6 +46,7 @@ async def test_database_middleware_injects_db(handler, mock_db):
 
 
 # ── UserAccessMiddleware ──────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_allows_admin_user(handler, mock_db):

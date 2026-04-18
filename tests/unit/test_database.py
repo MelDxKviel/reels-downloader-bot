@@ -1,12 +1,13 @@
 """
 Tests for DatabaseService using an in-memory SQLite database.
 """
+
 from datetime import datetime, timedelta
 
 import pytest
 
-
 # ── user management ───────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_add_new_user(db_service):
@@ -95,9 +96,12 @@ async def test_is_user_allowed_nonexistent(db_service):
 
 # ── statistics ────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_record_download_stores_entry(db_service):
-    await db_service.record_download(1001, "YouTube", "https://youtube.com/watch?v=abc", success=True)
+    await db_service.record_download(
+        1001, "YouTube", "https://youtube.com/watch?v=abc", success=True
+    )
     stats = await db_service.get_user_stats(1001)
     assert stats["total_downloads"] == 1
     assert stats["successful_downloads"] == 1
@@ -105,7 +109,9 @@ async def test_record_download_stores_entry(db_service):
 
 @pytest.mark.asyncio
 async def test_record_download_failed(db_service):
-    await db_service.record_download(1001, "YouTube", "https://youtube.com/watch?v=abc", success=False)
+    await db_service.record_download(
+        1001, "YouTube", "https://youtube.com/watch?v=abc", success=False
+    )
     stats = await db_service.get_user_stats(1001)
     assert stats["total_downloads"] == 1
     assert stats["successful_downloads"] == 0

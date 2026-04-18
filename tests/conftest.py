@@ -1,4 +1,3 @@
-import pytest
 import pytest_asyncio
 
 from src.services.database import DatabaseService
