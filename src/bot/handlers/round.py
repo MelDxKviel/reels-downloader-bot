@@ -99,6 +99,11 @@ async def _convert_to_round(input_path: str) -> Optional[str]:
 
     if proc.returncode == 0 and os.path.exists(output_path):
         return output_path
+    if os.path.exists(output_path):
+        try:
+            os.remove(output_path)
+        except Exception:
+            pass
     return None
 
 
@@ -185,6 +190,7 @@ async def cmd_round(message: Message, state: FSMContext, db: DatabaseService) ->
 
     if match:
         url = match.group(0)
+        await state.clear()
         status_msg = await message.answer("⏳ Обрабатываю...")
         await _download_and_send_round(message, db, status_msg, url)
         return
@@ -261,14 +267,13 @@ async def round_got_video(message: Message, state: FSMContext, db: DatabaseServi
     upload_path = str(Path(DOWNLOAD_DIR) / f"upload_{uuid.uuid4().hex[:8]}.mp4")
 
     try:
-        tg_file = await message.bot.get_file(file_id)
-        await message.bot.download_file(tg_file.file_path, destination=upload_path)
-    except Exception as e:
-        logger.error("Ошибка загрузки файла из Telegram: %s", e, exc_info=True)
-        await status_msg.edit_text("❌ <b>Не удалось загрузить файл</b>")
-        return
-
-    try:
+        try:
+            tg_file = await message.bot.get_file(file_id)
+            await message.bot.download_file(tg_file.file_path, destination=upload_path)
+        except Exception as e:
+            logger.error("Ошибка загрузки файла из Telegram: %s", e, exc_info=True)
+            await status_msg.edit_text("❌ <b>Не удалось загрузить файл</b>")
+            return
         await _send_round(
             message,
             db,
