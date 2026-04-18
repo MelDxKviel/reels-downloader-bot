@@ -18,10 +18,10 @@ def get_main_router() -> Router:
     # Подключаем роутеры в порядке приоритета
     main_router.include_router(admin_router)  # Админ-команды первые
     main_router.include_router(common_router)  # Общие команды
-    main_router.include_router(download_cmd_router)  # /download — до FSM-обработчиков round/gif/mp3
-    main_router.include_router(gif_router)  # /gif — до FSM-обработчиков round/mp3
-    main_router.include_router(round_router)  # /round — до FSM-обработчиков mp3
-    main_router.include_router(mp3_router)  # /mp3 — до общего обработчика URL
+    main_router.include_router(download_cmd_router)  # /download — до FSM-обработчиков gif/round/mp3
+    main_router.include_router(mp3_router)  # /mp3 — до FSM-обработчиков gif/round
+    main_router.include_router(gif_router)  # /gif — до FSM-обработчиков round
+    main_router.include_router(round_router)  # /round — до общего обработчика URL
     main_router.include_router(download_router)  # Обработка URL последняя
 
     return main_router
