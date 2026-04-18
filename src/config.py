@@ -37,3 +37,11 @@ DOWNLOAD_TIMEOUT: int = 300  # 5 минут
 # Путь к файлу cookies для YouTube (для видео 18+)
 # Экспортируйте cookies из браузера с помощью расширения "Get cookies.txt"
 YT_COOKIES_FILE: Optional[str] = os.getenv("YT_COOKIES_FILE", None)
+
+# ID чата для публикации видео в inline-режиме.
+# Telegram запрещает загружать новые файлы в editMessageMedia с inline_message_id —
+# принимаются только file_id или URL. Бот предварительно выгружает видео в этот чат
+# (канал, супергруппу или личку админа), получает file_id и затем подменяет им заглушку.
+# Если не задано — используется первый ID из ADMIN_USERS.
+_video_storage_env = os.getenv("VIDEO_STORAGE_CHAT_ID", "").strip()
+VIDEO_STORAGE_CHAT_ID: Optional[int] = int(_video_storage_env) if _video_storage_env else None

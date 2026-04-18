@@ -6,7 +6,7 @@ import logging
 from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.types import TelegramObject
 
 from src.config import ADMIN_USERS
 from src.services.database import DatabaseService
@@ -34,6 +34,7 @@ class UserAccessMiddleware(BaseMiddleware):
     """
     Middleware для проверки доступа пользователя.
     Пропускает только пользователей из базы данных или администраторов.
+    Применяется к Message, InlineQuery и ChosenInlineResult.
     """
 
     def __init__(self, db: DatabaseService):
@@ -41,14 +42,14 @@ class UserAccessMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[Message, Dict[str, Any]], Awaitable[Any]],
-        event: Message,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
         data: Dict[str, Any],
     ) -> Any:
-        user = event.from_user
+        user = getattr(event, "from_user", None)
 
         if user is None:
-            logger.warning("Получено сообщение без информации о пользователе")
+            logger.warning("Получено обновление без информации о пользователе")
             return
 
         # Администраторы всегда имеют доступ
@@ -63,6 +64,6 @@ class UserAccessMiddleware(BaseMiddleware):
         # Пользователь не в списке - логируем и отвечаем
         logger.info(
             f"🚫 Доступ запрещён для пользователя: {user.full_name} "
-            f"(ID: {user.id}, username: @{user.username})"
+            f"(ID: {user.id}, username: @{user.username}, event: {type(event).__name__})"
         )
         return

@@ -7,6 +7,7 @@ from .common import router as common_router
 from .download import router as download_router
 from .download_cmd import router as download_cmd_router
 from .gif import router as gif_router
+from .inline import router as inline_router
 from .mp3 import router as mp3_router
 from .round import router as round_router
 
@@ -23,5 +24,6 @@ def get_main_router() -> Router:
     main_router.include_router(gif_router)  # /gif — до FSM-обработчиков round
     main_router.include_router(round_router)  # /round — до общего обработчика URL
     main_router.include_router(download_router)  # Обработка URL последняя
+    main_router.include_router(inline_router)  # Inline-режим (inline_query/chosen_inline_result)
 
     return main_router

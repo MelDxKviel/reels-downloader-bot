@@ -31,6 +31,7 @@
 | 📥 **Мультиплатформенность** | YouTube, Instagram Reels, TikTok, X (Twitter) |
 | ⚡ **Кэш скачиваний** | Повторные ссылки отдаются мгновенно из локального кэша |
 | 🔐 **Контроль доступа** | Whitelist-система: только добавленные пользователи могут использовать бота |
+| 🪄 **Inline-режим** | Отправка видео прямо из любого чата: `@имя_бота <ссылка>` |
 | 🎥 **Видео-кружки** | Команда `/round` — конвертация видео в формат Telegram video note |
 | 📊 **Статистика** | Сбор статистики по платформам и пользователям в PostgreSQL |
 | 🐳 **Docker Compose** | Бот + PostgreSQL поднимаются одной командой |
@@ -73,6 +74,7 @@ POSTGRES_PASSWORD=postgres        # Только для Docker Compose
 # Опциональные
 DOWNLOAD_DIR=downloads            # Директория для загруженных файлов
 YT_COOKIES_FILE=./cookies.txt     # Cookies для YouTube 18+
+VIDEO_STORAGE_CHAT_ID=-1001234567890  # Чат для inline-pre-upload видео (fallback: первый ADMIN_USERS)
 
 # Только для Docker Compose
 YT_COOKIES_FILE_HOST_PATH=./cookies.txt  # Путь к cookies на хосте
@@ -88,6 +90,7 @@ YT_COOKIES_FILE_HOST_PATH=./cookies.txt  # Путь к cookies на хосте
 | `POSTGRES_PASSWORD` | Docker | Пароль PostgreSQL для Docker Compose |
 | `DOWNLOAD_DIR` | ❌ | Директория для файлов (по умолчанию `downloads`) |
 | `YT_COOKIES_FILE` | ❌ | Путь к cookies-файлу для YouTube |
+| `VIDEO_STORAGE_CHAT_ID` | ❌ | Чат для промежуточной выгрузки видео в inline-режиме ради получения `file_id`. Если не задан — используется первый ID из `ADMIN_USERS` |
 | `YT_COOKIES_FILE_HOST_PATH` | Docker | Путь к cookies на хосте (монтируется в контейнер) |
 
 > ⚠️ Если `ADMIN_USERS` пустой — все команды администратора будут недоступны.  
@@ -152,6 +155,33 @@ docker compose down
 | `/clearcache` | Очистить локальный кэш |
 
 > 💡 Также можно просто отправить ссылку в чат — бот скачает её автоматически.
+
+### Inline-режим
+
+В любом чате (в том числе где бота нет) наберите:
+
+```
+@имя_бота https://www.youtube.com/shorts/XXXXXXXXXXX
+```
+
+Telegram покажет карточку — выберите её, и ролик отправится прямо в текущий
+чат от имени вызвавшего пользователя. Видео, которое уже есть в кэше
+(ранее скачивалось этим ботом), уходит моментально. Новые ссылки сначала
+показываются плашкой «⏳ Загружаю…», которая подменяется на видео после
+скачивания.
+
+> ⚙️ Для работы второго сценария нужно:
+> - включить inline-режим у бота в BotFather (`/setinline`),
+> - включить inline feedback (`/setinlinefeedback → 100%`),
+> - задать `VIDEO_STORAGE_CHAT_ID` (любой чат/канал, где бот имеет право
+>   отправлять и удалять сообщения). Telegram не позволяет загружать новые
+>   файлы напрямую в inline-сообщения — бот сперва публикует видео в storage-чат,
+>   получает оттуда `file_id`, подставляет его в inline-карточку и удаляет
+>   промежуточное сообщение. Если `VIDEO_STORAGE_CHAT_ID` не задан, fallback —
+>   личка первого администратора (`ADMIN_USERS[0]`).
+>
+> Whitelist действует и для inline-запросов: пользователи не из списка получат
+> пустой ответ.
 
 ### Команды администратора
 
@@ -221,6 +251,7 @@ Router (приоритет):
   download_cmd_router       ← /download (FSM)
   round_router              ← /round (FSM + FFmpeg)
   download_router           ← авто-детект URL в сообщениях
+  inline_router             ← inline_query + chosen_inline_result
       │
       ▼
 VideoDownloader.download()  ← проверяет кэш → yt-dlp в thread executor

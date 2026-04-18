@@ -103,12 +103,40 @@ class VideoDownloader:
         """Добавляет результат в кэш."""
         if result.success and result.file_path:
             url_hash = get_url_hash(url)
-            self.cache[url_hash] = {
+            entry = self.cache.get(url_hash, {})
+            telegram_file_id = entry.get("telegram_file_id")
+            new_entry = {
                 "file_path": result.file_path,
                 "title": result.title,
                 "duration": result.duration,
             }
+            if telegram_file_id:
+                new_entry["telegram_file_id"] = telegram_file_id
+            self.cache[url_hash] = new_entry
             self._save_cache()
+
+    def get_telegram_file_id(self, url: str) -> Optional[str]:
+        """Возвращает сохранённый Telegram file_id для URL, если есть."""
+        url_hash = get_url_hash(url)
+        entry = self.cache.get(url_hash)
+        if not entry:
+            return None
+        file_id = entry.get("telegram_file_id")
+        return file_id if isinstance(file_id, str) and file_id else None
+
+    def set_telegram_file_id(self, url: str, file_id: str) -> None:
+        """Сохраняет Telegram file_id для URL (используется для inline-mode)."""
+        if not file_id:
+            return
+        url_hash = get_url_hash(url)
+        entry = self.cache.get(url_hash)
+        if entry is None:
+            entry = {}
+            self.cache[url_hash] = entry
+        if entry.get("telegram_file_id") == file_id:
+            return
+        entry["telegram_file_id"] = file_id
+        self._save_cache()
 
     def is_supported_url(self, url: str) -> bool:
         return is_supported_url(url)
