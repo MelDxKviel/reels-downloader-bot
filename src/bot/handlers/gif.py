@@ -46,9 +46,11 @@ class GifStates(StatesGroup):
     waiting_for_input = State()
 
 
-def _cancel_keyboard() -> InlineKeyboardMarkup:
+def _cancel_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_gif")]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_gif:{user_id}")]
+        ]
     )
 
 
@@ -197,15 +199,19 @@ async def cmd_gif(message: Message, state: FSMContext, db: DatabaseService) -> N
         "🎞 Отправьте ссылку на видео или mp4-файл.\n\n"
         "⏱ Видео будет обрезано до <b>10 секунд</b>\n"
         "📐 Размер: 480px · 10 fps · оптимизированная палитра",
-        reply_markup=_cancel_keyboard(),
+        reply_markup=_cancel_keyboard(message.from_user.id),
     )
     await state.set_state(GifStates.waiting_for_input)
     await state.update_data(prompt_message_id=prompt.message_id)
 
 
-@router.callback_query(F.data == "cancel_gif")
+@router.callback_query(F.data.startswith("cancel_gif:"))
 async def cancel_gif(callback: CallbackQuery, state: FSMContext) -> None:
-    """Отмена ожидания."""
+    """Отмена ожидания — только инициатор может отменить."""
+    owner_id = int(callback.data.split(":")[1])
+    if callback.from_user.id != owner_id:
+        await callback.answer("Это не ваша операция.", show_alert=True)
+        return
     await state.clear()
     await callback.message.edit_text("❌ Создание GIF отменено.")
     await callback.answer()
