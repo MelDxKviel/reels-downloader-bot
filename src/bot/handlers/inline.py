@@ -11,6 +11,10 @@ Telegram file_id, карточка превращается в готовое в
 ВАЖНО:
 - inline feedback у BotFather (`/setinlinefeedback → 100%`) должен быть включён,
   иначе не приходит chosen_inline_result и «медленный» путь не работает.
+- К placeholder-карточке ОБЯЗАТЕЛЬНО прикреплена inline-клавиатура: без неё
+  Telegram не присылает `inline_message_id` в chosen_inline_result, и сообщение
+  невозможно отредактировать (`Available only if there is an inline keyboard
+  attached to the message`).
 - Для загрузки новых видео в inline-сообщения Telegram принимает только file_id
   или URL (multipart запрещён). Поэтому видео сначала отправляется в storage-чат
   (`VIDEO_STORAGE_CHAT_ID` или первый `ADMIN_USERS`), и только затем его file_id
@@ -21,10 +25,13 @@ import logging
 import re
 from typing import Optional
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.types import (
+    CallbackQuery,
     ChosenInlineResult,
     FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedVideo,
@@ -49,6 +56,14 @@ URL_PATTERN = re.compile(
     r"|tiktok\.com|twitter\.com|x\.com)"
     r'[^\s<>"\']*',
     re.IGNORECASE,
+)
+
+# ВАЖНО: Telegram присылает chosen_inline_result.inline_message_id только если
+# к inline-результату прикреплена inline-клавиатура. Без неё мы не можем
+# отредактировать сообщение и подменить заглушку видео — поэтому всегда
+# вешаем placeholder-кнопку.
+LOADING_KEYBOARD = InlineKeyboardMarkup(
+    inline_keyboard=[[InlineKeyboardButton(text="⏳ Загружается…", callback_data="inline_loading")]]
 )
 
 HINT_TITLE = "Введите ссылку на видео"
@@ -128,7 +143,9 @@ async def inline_query_handler(query: InlineQuery) -> None:
         )
         return
 
-    # Медленный путь: отправляем заглушку-статью и докачиваем в chosen_inline_result.
+    # Медленный путь: отправляем заглушку-статью с inline-клавиатурой и докачиваем
+    # в chosen_inline_result. Клавиатура обязательна — без неё Telegram не пришлёт
+    # inline_message_id, и мы не сможем отредактировать сообщение в видео.
     await query.answer(
         results=[
             InlineQueryResultArticle(
@@ -139,11 +156,18 @@ async def inline_query_handler(query: InlineQuery) -> None:
                     message_text=f"⏳ Загружаю видео с <b>{platform}</b>...",
                     parse_mode="HTML",
                 ),
+                reply_markup=LOADING_KEYBOARD,
             )
         ],
         cache_time=1,
         is_personal=True,
     )
+
+
+@router.callback_query(F.data == "inline_loading")
+async def inline_loading_callback(callback: CallbackQuery) -> None:
+    """Тык по placeholder-кнопке во время загрузки."""
+    await callback.answer("⏳ Видео загружается, подождите…")
 
 
 @router.chosen_inline_result()
@@ -169,8 +193,10 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
 
     inline_message_id = chosen.inline_message_id
     if not inline_message_id:
+        # Telegram присылает inline_message_id только если у inline-результата
+        # была inline-клавиатура. Если её нет — отредактировать нечего.
         logger.warning(
-            "chosen_inline_result без inline_message_id — включите inline feedback у BotFather"
+            "chosen_inline_result без inline_message_id — у результата отсутствует reply_markup"
         )
         return
 
@@ -232,6 +258,7 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
                 supports_streaming=True,
                 caption=result.title or None,
             ),
+            reply_markup=None,
         )
     except Exception as e:
         logger.error("Ошибка при editMessageMedia (inline): %s", e, exc_info=True)
@@ -257,6 +284,7 @@ async def _safe_edit_text(bot: Bot, inline_message_id: str, text: str) -> None:
         await bot.edit_message_text(
             inline_message_id=inline_message_id,
             text=text,
+            reply_markup=None,
         )
     except Exception as e:
         logger.debug("Не удалось отредактировать inline-сообщение: %s", e)
