@@ -1,89 +1,242 @@
-# reels-downloader-bot
+# 🎬 Reels Downloader Bot
 
-Telegram-бот для скачивания видео по ссылке (YouTube / Instagram Reels / TikTok / X(Twitter)).  
-Проект построен на `aiogram` и использует `yt-dlp` для загрузки. Доступ к боту ограничивается списком пользователей, которым управляет администратор через команды в Telegram. Статистика использования собирается в PostgreSQL.
+> Telegram-бот для скачивания видео с YouTube, Instagram Reels, TikTok и X (Twitter).  
+> Построен на **aiogram 3.x** + **yt-dlp**, с PostgreSQL-статистикой и системой управления доступом.
 
-## Возможности
+![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)
+![aiogram](https://img.shields.io/badge/aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)
+![yt-dlp](https://img.shields.io/badge/yt--dlp-latest-red)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-336791?logo=postgresql&logoColor=white)
 
-- **Скачивание видео по ссылке**: отправьте боту ссылку — бот скачает и пришлёт файл (с учётом лимита Telegram).
-- **Кэш скачиваний**: повторные ссылки могут отдаваться из локального кэша.
-- **Ограничение доступа**:
-  - **Администраторы** задаются через `ADMIN_USERS` (в `.env`).
-  - **Разрешённые пользователи** хранятся в базе данных и управляются админ-командами.
-- **Статистика**:
-  - Общая статистика по боту
-  - Статистика по конкретному пользователю
-  - Разбивка по платформам (YouTube/Instagram/TikTok/X)
-- **Docker Compose**: запуск бота + PostgreSQL одной командой.
+---
 
-## Конфигурация
+## 📋 Содержание
 
-Перед запуском создайте файл окружения (можно на основе `env.example`) и заполните переменные:
+- [Возможности](#-возможности)
+- [Быстрый старт](#-быстрый-старт)
+- [Конфигурация](#-конфигурация)
+- [Запуск локально](#-запуск-локально-через-uv)
+- [Запуск через Docker](#-запуск-через-docker-compose)
+- [Команды бота](#-команды-бота)
+- [Cookies для YouTube 18+](#-cookies-для-youtube-18)
+- [Архитектура](#-архитектура)
 
-- **BOT_TOKEN**: токен бота из BotFather
-- **ADMIN_USERS**: список Telegram user_id администраторов через запятую
-- **DATABASE_URL**: строка подключения к PostgreSQL (async SQLAlchemy)
-- **POSTGRES_PASSWORD**: пароль PostgreSQL (используется в Docker Compose)
-- **DOWNLOAD_DIR**: директория для загруженных файлов (по умолчанию `downloads`)
-- **YT_COOKIES_FILE**: путь к файлу cookies для YouTube (для видео 18+)
-- **YT_COOKIES_FILE_HOST_PATH**: (только для Docker Compose) путь к cookies-файлу на хосте, который будет смонтирован в контейнер как `/app/cookies.txt`
+---
 
-Важно:
-- Если `ADMIN_USERS` пустой — админ-команды будут недоступны.
-- Обычные пользователи должны быть добавлены администратором, иначе доступ к боту будет запрещён.
+## ✨ Возможности
 
-## Запуск (локально, через uv)
+| Функция | Описание |
+|---|---|
+| 📥 **Мультиплатформенность** | YouTube, Instagram Reels, TikTok, X (Twitter) |
+| ⚡ **Кэш скачиваний** | Повторные ссылки отдаются мгновенно из локального кэша |
+| 🔐 **Контроль доступа** | Whitelist-система: только добавленные пользователи могут использовать бота |
+| 🎥 **Видео-кружки** | Команда `/round` — конвертация видео в формат Telegram video note |
+| 📊 **Статистика** | Сбор статистики по платформам и пользователям в PostgreSQL |
+| 🐳 **Docker Compose** | Бот + PostgreSQL поднимаются одной командой |
+| 🍪 **YouTube Cookies** | Поддержка скачивания видео с возрастными ограничениями |
 
-1) Установите `uv` (см. документацию Astral).  
-2) Установите зависимости: `uv sync`  
-3) Заполните `.env`  
-4) Запустите бота: `uv run python -m src.main`
+---
 
-Примечание: для некоторых форматов может понадобиться FFmpeg. Если его нет, часть видео может не скачиваться (особенно когда требуется склейка аудио+видео).
+## 🚀 Быстрый старт
 
-## Запуск (Docker Compose)
+```bash
+# 1. Клонируйте репозиторий
+git clone https://github.com/meldxkviel/reels-downloader-bot.git
+cd reels-downloader-bot
 
-1) Заполните `.env` (можно на основе `env.example`; как минимум `BOT_TOKEN`, `ADMIN_USERS`, при необходимости `POSTGRES_PASSWORD`).  
-2) Запустите сервисы: `docker compose up -d`  
-3) Логи бота: `docker compose logs -f bot`
+# 2. Создайте .env файл
+cp .env.example .env  # или создайте вручную (см. раздел Конфигурация)
 
-Данные PostgreSQL сохраняются в volume `postgres_data`. Скачанные файлы сохраняются в локальную папку `downloads/` (смонтирована в контейнер).
+# 3. Запустите через Docker Compose
+docker compose up -d
 
-## Админ-команды
+# 4. Проверьте логи
+docker compose logs -f bot
+```
 
-Доступны только пользователям из `ADMIN_USERS`:
+---
 
-- **/adminhelp** — справка по админ-командам
-- **/adduser USER_ID** — добавить пользователя (разрешить доступ)
-- **/removeuser USER_ID** — удалить пользователя (запретить доступ)
-- **/users** — список разрешённых пользователей
-- **/stats** — общая статистика бота
-- **/userstats USER_ID** — статистика по конкретному пользователю
+## ⚙️ Конфигурация
 
-## Пользовательские команды
+Создайте файл `.env` в корне проекта:
 
-- **/start** — приветствие и краткая инструкция
-- **/help** — справка
-- **/id** — показать ваш Telegram user_id
-- **/cache** — информация о локальном кэше скачанных файлов
-- **/clearcache** — очистка локального кэша
+```env
+# Обязательные
+BOT_TOKEN=your_bot_token_from_botfather
+ADMIN_USERS=123456789,987654321   # Telegram user_id через запятую
 
-## Видео с ограничениями 18+ (YouTube)
+# База данных
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/downloader_bot
+POSTGRES_PASSWORD=postgres        # Только для Docker Compose
 
-Для скачивания видео с возрастными ограничениями необходимо предоставить cookies вашего YouTube-аккаунта:
+# Опциональные
+DOWNLOAD_DIR=downloads            # Директория для загруженных файлов
+YT_COOKIES_FILE=./cookies.txt     # Cookies для YouTube 18+
 
-1. Установите расширение для браузера (например, «Get cookies.txt LOCALLY» для Chrome).
-2. Войдите в свой YouTube-аккаунт.
+# Только для Docker Compose
+YT_COOKIES_FILE_HOST_PATH=./cookies.txt  # Путь к cookies на хосте
+```
+
+### Описание переменных
+
+| Переменная | Обязательна | Описание |
+|---|:---:|---|
+| `BOT_TOKEN` | ✅ | Токен бота из [@BotFather](https://t.me/BotFather) |
+| `ADMIN_USERS` | ✅ | Telegram user_id администраторов (через запятую) |
+| `DATABASE_URL` | ✅ | Строка подключения к PostgreSQL (async SQLAlchemy) |
+| `POSTGRES_PASSWORD` | Docker | Пароль PostgreSQL для Docker Compose |
+| `DOWNLOAD_DIR` | ❌ | Директория для файлов (по умолчанию `downloads`) |
+| `YT_COOKIES_FILE` | ❌ | Путь к cookies-файлу для YouTube |
+| `YT_COOKIES_FILE_HOST_PATH` | Docker | Путь к cookies на хосте (монтируется в контейнер) |
+
+> ⚠️ Если `ADMIN_USERS` пустой — все команды администратора будут недоступны.  
+> ⚠️ Обычные пользователи должны быть добавлены администратором через `/adduser`.
+
+---
+
+## 💻 Запуск локально (через uv)
+
+```bash
+# 1. Установите uv (менеджер пакетов)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Установите зависимости
+uv sync
+
+# 3. Примените миграции базы данных
+uv run alembic upgrade head
+
+# 4. Запустите бота
+uv run python -m src.main
+```
+
+> 💡 Для работы с некоторыми форматами требуется **FFmpeg**. Без него часть видео может не скачиваться (особенно когда нужна склейка аудио + видео).  
+> Установка: `sudo apt install ffmpeg` (Linux) или `brew install ffmpeg` (macOS).
+
+---
+
+## 🐳 Запуск через Docker Compose
+
+```bash
+# Запуск бота и базы данных
+docker compose up -d
+
+# Просмотр логов в реальном времени
+docker compose logs -f bot
+
+# Остановка
+docker compose down
+```
+
+**Что происходит под капотом:**
+- `bot` — контейнер с ботом (образ из GitHub Container Registry)
+- `db` — PostgreSQL 17 Alpine с health check
+- Данные БД сохраняются в volume `postgres_data`
+- Скачанные файлы монтируются в `./downloads/`
+
+---
+
+## 📱 Команды бота
+
+### Пользовательские команды
+
+| Команда | Описание |
+|---|---|
+| `/start` | Приветствие и краткая инструкция |
+| `/help` | Справка по командам |
+| `/id` | Показать ваш Telegram user_id |
+| `/download [url]` | Скачать видео по ссылке (с FSM-ожиданием или сразу) |
+| `/round [url]` | Скачать видео и отправить как кружок (video note) |
+| `/cache` | Информация о локальном кэше |
+| `/clearcache` | Очистить локальный кэш |
+
+> 💡 Также можно просто отправить ссылку в чат — бот скачает её автоматически.
+
+### Команды администратора
+
+> Доступны только пользователям из `ADMIN_USERS`. Полная справка: `/adminhelp`.
+
+| Команда | Описание |
+|---|---|
+| `/adduser USER_ID` | Добавить пользователя (разрешить доступ) |
+| `/removeuser USER_ID` | Удалить пользователя (запретить доступ) |
+| `/users` | Список всех разрешённых пользователей |
+| `/stats` | Общая статистика бота по платформам |
+| `/userstats USER_ID` | Статистика по конкретному пользователю |
+| `/adminhelp` | Справка по всем админ-командам |
+
+---
+
+## 🍪 Cookies для YouTube 18+
+
+Для скачивания видео с возрастными ограничениями нужны cookies авторизованного аккаунта YouTube.
+
+**Шаги:**
+
+1. Установите расширение браузера [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) (Chrome/Edge).
+2. Войдите в YouTube-аккаунт.
 3. Откройте любую страницу YouTube и экспортируйте cookies в файл `cookies.txt`.
-4. Укажите путь в переменных окружения:
-   - Для Docker Compose:
-     - `YT_COOKIES_FILE=/app/cookies.txt`
-     - `YT_COOKIES_FILE_HOST_PATH=ПУТЬ_НА_ХОСТЕ_ДО_cookies.txt` (по умолчанию `./cookies.txt`)
-   - Для локального запуска:
-     - `YT_COOKIES_FILE=ПУТЬ_НА_ХОСТЕ_ДО_cookies.txt`
+4. Пропишите путь в `.env`:
 
-Примеры:
-- Docker Compose (Windows): `YT_COOKIES_FILE_HOST_PATH=C:\Users\me\Downloads\cookies.txt`
-- Локально (Windows): `YT_COOKIES_FILE=C:\Users\me\Downloads\cookies.txt`
+**Локальный запуск:**
+```env
+YT_COOKIES_FILE=./cookies.txt
+```
 
-Cookies могут истекать со временем — при ошибках авторизации повторите экспорт.
+**Docker Compose:**
+```env
+YT_COOKIES_FILE=/app/cookies.txt
+YT_COOKIES_FILE_HOST_PATH=./cookies.txt   # путь на хосте
+```
+
+**Примеры для Windows:**
+```env
+# Локально
+YT_COOKIES_FILE=C:\Users\me\Downloads\cookies.txt
+
+# Docker Compose
+YT_COOKIES_FILE_HOST_PATH=C:\Users\me\Downloads\cookies.txt
+```
+
+> ⚠️ Cookies могут истекать. При ошибках авторизации — повторите экспорт.
+
+---
+
+## 🏗️ Архитектура
+
+```
+Telegram Update
+      │
+      ▼
+DatabaseMiddleware          ← инжектит DatabaseService в хендлеры
+      │
+      ▼
+UserAccessMiddleware        ← проверяет whitelist, дропает неразрешённых
+      │
+      ▼
+Router (приоритет):
+  admin_router              ← /adduser, /removeuser, /stats ...
+  common_router             ← /start, /help, /id, /cache ...
+  download_cmd_router       ← /download (FSM)
+  round_router              ← /round (FSM + FFmpeg)
+  download_router           ← авто-детект URL в сообщениях
+      │
+      ▼
+VideoDownloader.download()  ← проверяет кэш → yt-dlp в thread executor
+      │
+      ▼
+Telegram (отправка файла)   ← DatabaseService.record_download()
+```
+
+**Стек технологий:**
+
+| Компонент | Технология |
+|---|---|
+| Bot framework | [aiogram 3.x](https://docs.aiogram.dev/) (async) |
+| Загрузчик видео | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (sync, через executor) |
+| База данных | PostgreSQL 17 + SQLAlchemy async ORM |
+| Миграции | Alembic |
+| Контейнеризация | Docker Compose |
+| Управление зависимостями | [uv](https://docs.astral.sh/uv/) |
+| Линтер | [ruff](https://docs.astral.sh/ruff/) |
