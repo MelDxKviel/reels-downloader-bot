@@ -76,7 +76,11 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
         # Отправляем видео
         video_file = FSInputFile(result.file_path)
 
-        await message.answer_video(video=video_file, supports_streaming=True)
+        sent = await message.answer_video(video=video_file, supports_streaming=True)
+
+        # Сохраняем Telegram file_id, чтобы inline-режим мог отдавать видео моментально
+        if sent.video and sent.video.file_id:
+            downloader.set_telegram_file_id(url, sent.video.file_id)
 
         # Удаляем сообщение о статусе
         await status_message.delete()

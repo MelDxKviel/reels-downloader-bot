@@ -81,7 +81,11 @@ async def _download_and_send(
         await status_msg.edit_text("📤 Отправляю видео...")
 
     try:
-        await message.answer_video(video=FSInputFile(result.file_path), supports_streaming=True)
+        sent = await message.answer_video(
+            video=FSInputFile(result.file_path), supports_streaming=True
+        )
+        if sent.video and sent.video.file_id:
+            downloader.set_telegram_file_id(url, sent.video.file_id)
         await status_msg.delete()
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=True
