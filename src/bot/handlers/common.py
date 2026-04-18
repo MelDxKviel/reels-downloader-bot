@@ -8,6 +8,7 @@ from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
+from src.bot.handlers.admin import is_admin
 from src.services.downloader import downloader
 
 router = Router()
@@ -32,7 +33,7 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     """Обработчик команды /help."""
-    await message.answer(
+    text = (
         "📖 <b>Как пользоваться ботом:</b>\n\n"
         "1️⃣ Скопируй ссылку на видео\n"
         "2️⃣ Отправь её мне в чат\n"
@@ -47,6 +48,11 @@ async def cmd_help(message: Message) -> None:
         "• Приватные видео не поддерживаются\n\n"
         "💡 <b>Совет:</b> Если видео слишком большое, попробуй найти его в более низком качестве"
     )
+    if is_admin(message.from_user.id):
+        text += (
+            "\n\n🔐 <b>Вы администратор.</b> Используйте /adminhelp для списка команд управления."
+        )
+    await message.answer(text)
 
 
 @router.message(Command("id"))
