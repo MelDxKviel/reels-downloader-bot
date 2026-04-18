@@ -37,7 +37,7 @@ There is no test suite in this repository.
 1. aiogram receives a Telegram update and passes it through two middlewares (in order):
    - `DatabaseMiddleware` — injects a `DatabaseService` instance into handler `data`
    - `UserAccessMiddleware` — silently drops messages from non-admin, non-whitelisted users
-2. The update is routed to one of three routers registered in priority order: `admin_router` → `common_router` → `download_router`
+2. The update is routed to one of five routers registered in priority order: `admin_router` → `common_router` → `download_cmd_router` → `round_router` → `download_router`
 3. Download handlers call `VideoDownloader.download(url)`, which checks an in-memory/JSON cache before spawning yt-dlp in a thread executor (`loop.run_in_executor`)
 4. Results are uploaded to Telegram; both successes and failures are recorded via `DatabaseService.record_download()`
 
@@ -53,6 +53,8 @@ There is no test suite in this repository.
 
 **YouTube cookies**: If `YT_COOKIES_FILE` is set, the file is validated for Netscape format before being passed to yt-dlp. Cookies are only applied to YouTube URLs, not other platforms. Invalid cookies trigger a retry without them.
 
+**FSM command pattern**: `/download` and `/round` both use aiogram FSM. If a URL is passed inline (`/download <url>`), the download starts immediately. Otherwise the handler enters a waiting state and shows an inline cancel button. The cancel callback embeds the initiating `user_id` in its `callback_data` (`cancel_download:<id>`, `cancel_round`) so only the original user can dismiss the prompt in group chats. `download_cmd_router` is registered before `round_router` so `/download` is matched as a command even while a user is in `RoundStates.waiting_for_input`.
+
 ### Module Map
 
 ```
@@ -61,9 +63,11 @@ src/
 ├── config.py         — Env vars, constants (MAX_FILE_SIZE=50MB, DOWNLOAD_TIMEOUT=300s)
 ├── bot/
 │   ├── handlers/
-│   │   ├── common.py   — /start, /help, /id, /cache, /clearcache
-│   │   ├── download.py — URL detection (regex), download flow, status messages
-│   │   └── admin.py    — /adduser, /removeuser, /users, /stats, /userstats, /adminhelp
+│   │   ├── common.py        — /start, /help, /id, /cache, /clearcache
+│   │   ├── download.py      — URL detection (regex), catch-all download flow
+│   │   ├── download_cmd.py  — /download command with FSM waiting state
+│   │   ├── round.py         — /round command, FFmpeg conversion to video note
+│   │   └── admin.py         — /adduser, /removeuser, /users, /stats, /userstats, /adminhelp
 │   └── middlewares/
 │       └── access.py   — DatabaseMiddleware, UserAccessMiddleware
 └── services/
