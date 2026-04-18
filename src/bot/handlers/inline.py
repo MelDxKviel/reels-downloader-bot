@@ -5,12 +5,16 @@ Inline-mode загрузка видео.
 одной inline-карточкой. Если видео уже есть в локальном кэше с сохранённым
 Telegram file_id, карточка превращается в готовое видео, и Telegram отправляет
 его моментально. Иначе карточка отправляется как текстовая "заглушка", а после
-выбора (chosen_inline_result) бот скачивает ролик и подменяет текст на видео
-через editMessageMedia.
+выбора (chosen_inline_result) бот скачивает ролик, публикует его в storage-чат,
+получает оттуда file_id и подменяет текст на видео через editMessageMedia.
 
-ВАЖНО: для обработки выбора карточки требуется включить inline feedback у
-BotFather командой /setinlinefeedback (выставить 100%). Без этого путь
-"скачать и прислать" работать не будет.
+ВАЖНО:
+- inline feedback у BotFather (`/setinlinefeedback → 100%`) должен быть включён,
+  иначе не приходит chosen_inline_result и «медленный» путь не работает.
+- Для загрузки новых видео в inline-сообщения Telegram принимает только file_id
+  или URL (multipart запрещён). Поэтому видео сначала отправляется в storage-чат
+  (`VIDEO_STORAGE_CHAT_ID` или первый `ADMIN_USERS`), и только затем его file_id
+  подставляется в editMessageMedia.
 """
 
 import logging
@@ -28,6 +32,7 @@ from aiogram.types import (
     InputTextMessageContent,
 )
 
+from src.config import ADMIN_USERS, VIDEO_STORAGE_CHAT_ID
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
 from src.services.url_utils import get_url_hash
@@ -36,10 +41,12 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+# Любой поддомен (`m.youtube.com`, `vt.tiktok.com`, `music.youtube.com` и т.п.) —
+# такой же диапазон, как у downloader.is_supported_url.
 URL_PATTERN = re.compile(
-    r"https?://(?:www\.)?"
+    r"https?://(?:[\w-]+\.)*"
     r"(?:youtube\.com|youtu\.be|instagram\.com|kkinstagram\.com"
-    r"|tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|twitter\.com|x\.com)"
+    r"|tiktok\.com|twitter\.com|x\.com)"
     r'[^\s<>"\']*',
     re.IGNORECASE,
 )
@@ -200,11 +207,28 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
+    # Для inline-редактирования Telegram не принимает multipart-загрузку — только
+    # file_id/URL. Поэтому сперва заливаем видео в storage-чат и извлекаем file_id.
+    file_id = await _upload_and_get_file_id(bot, result.file_path)
+    if not file_id:
+        await _safe_edit_text(
+            bot,
+            inline_message_id,
+            "❌ <b>Не удалось опубликовать видео</b>\n\n"
+            "Inline-storage не настроен или видео не загрузилось. "
+            "Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",
+        )
+        await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
+        return
+
+    # Кэшируем file_id сразу — следующий такой же inline-запрос пойдёт мгновенным путём.
+    downloader.set_telegram_file_id(url, file_id)
+
     try:
-        edited = await bot.edit_message_media(
+        await bot.edit_message_media(
             inline_message_id=inline_message_id,
             media=InputMediaVideo(
-                media=FSInputFile(result.file_path),
+                media=file_id,
                 supports_streaming=True,
                 caption=result.title or None,
             ),
@@ -214,14 +238,10 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
         await _safe_edit_text(
             bot,
             inline_message_id,
-            "❌ <b>Не удалось отправить видео</b>\n\nВозможно, файл слишком большой.",
+            "❌ <b>Не удалось отправить видео</b>\n\nПопробуйте позже.",
         )
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
-
-    # editMessageMedia с inline_message_id возвращает True — file_id не приходит.
-    # Закешируем file_id в следующий раз, когда видео уйдёт через обычный чат.
-    _ = edited
 
     await db.record_download(user_id=user_id, platform=platform, url=url, success=True)
     logger.info(
@@ -240,3 +260,50 @@ async def _safe_edit_text(bot: Bot, inline_message_id: str, text: str) -> None:
         )
     except Exception as e:
         logger.debug("Не удалось отредактировать inline-сообщение: %s", e)
+
+
+def _resolve_storage_chat_id() -> Optional[int]:
+    """Определяет чат для промежуточной публикации видео ради file_id."""
+    if VIDEO_STORAGE_CHAT_ID is not None:
+        return VIDEO_STORAGE_CHAT_ID
+    if ADMIN_USERS:
+        return ADMIN_USERS[0]
+    return None
+
+
+async def _upload_and_get_file_id(bot: Bot, file_path: str) -> Optional[str]:
+    """
+    Заливает видео в storage-чат и возвращает его Telegram file_id.
+    Промежуточное сообщение удаляется (best-effort), file_id остаётся валидным.
+    """
+    storage_chat_id = _resolve_storage_chat_id()
+    if storage_chat_id is None:
+        logger.error("Нет VIDEO_STORAGE_CHAT_ID и ADMIN_USERS — inline не может опубликовать видео")
+        return None
+
+    try:
+        staging = await bot.send_video(
+            chat_id=storage_chat_id,
+            video=FSInputFile(file_path),
+            supports_streaming=True,
+            disable_notification=True,
+        )
+    except Exception as e:
+        logger.error(
+            "Не удалось выгрузить видео в storage-чат %s: %s",
+            storage_chat_id,
+            e,
+            exc_info=True,
+        )
+        return None
+
+    file_id = staging.video.file_id if staging.video else None
+    if not file_id:
+        logger.error("Сообщение в storage-чате не содержит video — file_id не получен")
+
+    try:
+        await bot.delete_message(chat_id=storage_chat_id, message_id=staging.message_id)
+    except Exception as e:
+        logger.debug("Не удалось удалить промежуточное сообщение в storage: %s", e)
+
+    return file_id
