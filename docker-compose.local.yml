@@ -1,6 +1,6 @@
 services:
   bot:
-    image: ghcr.io/meldxkviel/reels-downloader-bot:latest
+    build: .
     container_name: downloader-bot
     restart: unless-stopped
     depends_on:
