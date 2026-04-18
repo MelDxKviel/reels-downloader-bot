@@ -1,6 +1,6 @@
 """Business logic services."""
-from .downloader import downloader, DownloadResult, VideoDownloader
+
 from .database import DatabaseService
+from .downloader import DownloadResult, VideoDownloader, downloader
 
 __all__ = ["downloader", "DownloadResult", "VideoDownloader", "DatabaseService"]
-

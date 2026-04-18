@@ -1,10 +1,11 @@
 """
 Общие команды бота: /start, /help, /id, /cache, /clearcache
 """
+
 import os
 
 from aiogram import Router
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from src.services.downloader import downloader
@@ -66,10 +67,10 @@ async def cmd_cache(message: Message) -> None:
     cache_size = len(downloader.cache)
     total_size = 0
     for data in downloader.cache.values():
-        file_path = data.get('file_path')
+        file_path = data.get("file_path")
         if file_path and os.path.exists(file_path):
             total_size += os.path.getsize(file_path)
-    
+
     size_mb = total_size / (1024 * 1024)
     await message.answer(
         f"💾 <b>Информация о кэше:</b>\n\n"
@@ -83,8 +84,4 @@ async def cmd_cache(message: Message) -> None:
 async def cmd_clearcache(message: Message) -> None:
     """Очищает кэш видео."""
     count = downloader.clear_cache()
-    await message.answer(
-        f"🗑 Кэш очищен!\n"
-        f"Удалено файлов: {count}"
-    )
-
+    await message.answer(f"🗑 Кэш очищен!\nУдалено файлов: {count}")

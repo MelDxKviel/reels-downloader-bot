@@ -1,2 +1,1 @@
 """Video Downloader Telegram Bot."""
-
