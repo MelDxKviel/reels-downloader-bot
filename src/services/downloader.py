@@ -662,7 +662,7 @@ class VideoDownloader:
             if result.success and is_instagram_photo_candidate_url(url) and result.file_path:
                 # Extract frame for photo posts (yt-dlp downloads them as 0-second videos).
                 # Also attempt for None duration — missing metadata on a /p/ post likely means photo.
-                if result.duration is None or result.duration <= 1.0:
+                if result.duration is not None and result.duration <= 1.0:
                     frame_result = await loop.run_in_executor(
                         None, lambda: self._extract_photo_frame(result)
                     )
@@ -685,9 +685,18 @@ class VideoDownloader:
         if not meta or meta.get("has_video") or not meta.get("image_urls"):
             return None
 
+        # Reject login/consent/error pages: their og:image tags reference generic
+        # Instagram branding, not CDN-hosted post media.
+        cdn_images = [
+            u for u in meta["image_urls"]
+            if any(d in u for d in ("cdninstagram.com", "fbcdn.net", "instagram.f"))
+        ]
+        if not cdn_images:
+            return None
+
         batch_id = str(uuid.uuid4())[:8]
         downloaded: list[str] = []
-        for idx, image_url in enumerate(meta["image_urls"]):
+        for idx, image_url in enumerate(cdn_images):
             output_base = str(self.download_dir / f"{batch_id}_{idx}")
             path = self._download_image_sync(image_url, output_base)
             if path:
