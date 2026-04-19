@@ -6,7 +6,8 @@ import logging
 import re
 
 from aiogram import F, Router
-from aiogram.types import FSInputFile, InputMediaPhoto, Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, Message
 
 from src.services.database import DatabaseService
 from src.services.downloader import DownloadResult, downloader
@@ -77,11 +78,21 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
 
         if result.is_photo:
             photo_paths = result.photo_paths or [result.file_path]
-            if len(photo_paths) > 1:
-                media = [InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths]
-                await message.answer_media_group(media=media)
-            else:
-                await message.answer_photo(photo=FSInputFile(photo_paths[0]))
+            try:
+                if len(photo_paths) > 1:
+                    media = [InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths]
+                    await message.answer_media_group(media=media)
+                else:
+                    await message.answer_photo(photo=FSInputFile(photo_paths[0]))
+            except TelegramBadRequest as e:
+                if "IMAGE_PROCESS_FAILED" not in str(e):
+                    raise
+                # Unsupported image format (e.g. WebP, HEIC) — send as file
+                if len(photo_paths) > 1:
+                    docs = [InputMediaDocument(media=FSInputFile(p)) for p in photo_paths]
+                    await message.answer_media_group(media=docs)
+                else:
+                    await message.answer_document(document=FSInputFile(photo_paths[0]))
         else:
             sent = await message.answer_video(
                 video=FSInputFile(result.file_path), supports_streaming=True
