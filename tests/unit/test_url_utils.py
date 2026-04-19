@@ -5,6 +5,8 @@ from src.services.url_utils import (
     build_kkinstagram_url,
     get_platform_name,
     get_url_hash,
+    is_instagram_photo_candidate_url,
+    is_instagram_post_url,
     is_instagram_url,
     is_kkinstagram_url,
     is_supported_url,
@@ -229,8 +231,6 @@ def test_should_retry_with_kkinstagram_false_for_unrelated_error():
 
 
 # --- is_instagram_post_url ---
-
-from src.services.url_utils import is_instagram_post_url, is_instagram_photo_candidate_url
 
 
 @pytest.mark.parametrize(
