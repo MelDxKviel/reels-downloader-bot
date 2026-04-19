@@ -226,3 +226,64 @@ def test_should_retry_with_kkinstagram_false_when_already_kk():
 def test_should_retry_with_kkinstagram_false_for_unrelated_error():
     url = "https://www.instagram.com/reel/abc/"
     assert should_retry_with_kkinstagram(url, "network timeout") is False
+
+
+# --- is_instagram_post_url ---
+
+from src.services.url_utils import is_instagram_post_url, is_instagram_photo_candidate_url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.instagram.com/p/ABC123/",
+        "https://www.instagram.com/reel/ABC123/",
+        "https://www.instagram.com/reels/ABC123/",
+        "https://www.instagram.com/tv/ABC123/",
+        "https://kkinstagram.com/p/ABC123/",
+        "https://kkinstagram.com/reel/ABC123/",
+    ],
+)
+def test_is_instagram_post_url_true(url):
+    assert is_instagram_post_url(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.instagram.com/",
+        "https://www.instagram.com/user/",
+        "https://www.youtube.com/watch?v=abc",
+        "https://www.tiktok.com/@user/video/123",
+    ],
+)
+def test_is_instagram_post_url_false(url):
+    assert is_instagram_post_url(url) is False
+
+
+# --- is_instagram_photo_candidate_url ---
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.instagram.com/p/ABC123/",
+        "https://www.instagram.com/p/XYZ/",
+        "https://kkinstagram.com/p/ABC123/",
+    ],
+)
+def test_is_instagram_photo_candidate_url_true(url):
+    assert is_instagram_photo_candidate_url(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.instagram.com/reel/ABC123/",
+        "https://www.instagram.com/reels/ABC123/",
+        "https://www.instagram.com/tv/ABC123/",
+        "https://www.youtube.com/watch?v=abc",
+    ],
+)
+def test_is_instagram_photo_candidate_url_false(url):
+    assert is_instagram_photo_candidate_url(url) is False

@@ -52,3 +52,24 @@ def test_download_dir_default():
 
         importlib.reload(cfg)
         assert cfg.DOWNLOAD_DIR == os.getenv("DOWNLOAD_DIR", "downloads")
+
+
+def test_video_storage_chat_id_parsed():
+    with patch.dict(os.environ, {"VIDEO_STORAGE_CHAT_ID": "-1001234567890"}):
+        import importlib
+
+        import src.config as cfg
+
+        importlib.reload(cfg)
+        assert cfg.VIDEO_STORAGE_CHAT_ID == -1001234567890
+
+
+def test_video_storage_chat_id_none_when_not_set():
+    env = {k: v for k, v in os.environ.items() if k != "VIDEO_STORAGE_CHAT_ID"}
+    with patch.dict(os.environ, env, clear=True):
+        import importlib
+
+        import src.config as cfg
+
+        importlib.reload(cfg)
+        assert cfg.VIDEO_STORAGE_CHAT_ID is None
