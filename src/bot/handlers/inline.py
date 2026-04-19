@@ -22,6 +22,7 @@ Telegram отправляет его моментально. Иначе карт
   подставляется в editMessageMedia.
 """
 
+import html
 import logging
 import os
 import re
@@ -257,10 +258,11 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
         return
 
     if not result.success or not result.file_path:
+        reason = html.escape(result.error or "неизвестная ошибка")
         await _safe_edit_text(
             bot,
             inline_message_id,
-            f"❌ <b>Не удалось скачать</b>\n\nПричина: {result.error or 'неизвестная ошибка'}",
+            f"❌ <b>Не удалось скачать</b>\n\nПричина: {reason}",
         )
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
