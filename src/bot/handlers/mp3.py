@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -159,7 +160,8 @@ async def _download_and_send_mp3(
         return
 
     if not result.success:
-        await status_msg.edit_text(f"❌ <b>Не удалось скачать видео</b>\n\nПричина: {result.error}")
+        reason = html.escape(result.error or "Неизвестная ошибка")
+        await status_msg.edit_text(f"❌ <b>Не удалось скачать видео</b>\n\nПричина: {reason}")
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )

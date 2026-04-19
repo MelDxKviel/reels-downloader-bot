@@ -2,6 +2,7 @@
 Обработчик загрузки видео по URL.
 """
 
+import html
 import logging
 import re
 
@@ -63,9 +64,8 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
         result: DownloadResult = await downloader.download(url)
 
         if not result.success:
-            await status_message.edit_text(
-                f"❌ <b>Не удалось скачать</b>\n\nПричина: {result.error}"
-            )
+            reason = html.escape(result.error or "Неизвестная ошибка")
+            await status_message.edit_text(f"❌ <b>Не удалось скачать</b>\n\nПричина: {reason}")
             return
 
         media_label = "фото" if result.is_photo else "видео"

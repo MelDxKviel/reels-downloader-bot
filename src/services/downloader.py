@@ -479,6 +479,13 @@ class VideoDownloader:
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
                 content_type = (resp.headers.get("Content-Type") or "").lower()
+                if not content_type.startswith("image/"):
+                    logger.warning(
+                        "Отбрасываю фото %s: Content-Type %r не является image/*",
+                        image_url,
+                        content_type,
+                    )
+                    return None
                 if "jpeg" in content_type or "jpg" in content_type:
                     ext = "jpg"
                 elif "png" in content_type:
@@ -514,6 +521,17 @@ class VideoDownloader:
                             )
                             return None
                         f.write(chunk)
+                if total < 1024:
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+                    logger.warning(
+                        "Отбрасываю фото %s: слишком маленький файл (%s байт)",
+                        image_url,
+                        total,
+                    )
+                    return None
                 return output_path
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             logger.warning("Не удалось скачать фото %s: %s", image_url, e)
