@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import urllib.error
 import urllib.request
 import uuid
@@ -596,6 +597,42 @@ class VideoDownloader:
 
         return opts
 
+    def _extract_photo_frame(self, result: DownloadResult) -> Optional[DownloadResult]:
+        """
+        Extracts the first frame from a video using FFmpeg and returns it as a photo result.
+        Used for Instagram photo posts which yt-dlp downloads as 0-second videos.
+        Returns None if extraction fails (caller should fall back to sending as video).
+        """
+        if not self.has_ffmpeg or not result.file_path:
+            return None
+        video_path = result.file_path
+        output_path = os.path.splitext(video_path)[0] + "_photo.jpg"
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-i", video_path, "-vframes", "1", "-q:v", "2", output_path],
+                capture_output=True,
+                timeout=30,
+            )
+            if proc.returncode != 0:
+                return None
+            if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
+                return None
+            try:
+                os.remove(video_path)
+            except OSError:
+                pass
+            return DownloadResult(
+                success=True,
+                file_path=output_path,
+                title=result.title,
+                duration=result.duration,
+                is_photo=True,
+                photo_paths=[output_path],
+            )
+        except (subprocess.TimeoutExpired, OSError, Exception) as e:
+            logger.warning("Frame extraction failed: %s", e)
+            return None
+
     async def download(self, url: str) -> DownloadResult:
         """Скачивает видео по URL."""
         if not is_supported_url(url):
@@ -609,20 +646,18 @@ class VideoDownloader:
             return cached
 
         loop = asyncio.get_event_loop()
-
-        if is_instagram_photo_candidate_url(url):
-            photo_result = await loop.run_in_executor(None, lambda: self._try_instagram_photo(url))
-            if photo_result is not None:
-                if photo_result.success:
-                    self.add_to_cache(url, photo_result)
-                return photo_result
-
         file_id = str(uuid.uuid4())[:8]
         output_path = str(self.download_dir / f"{file_id}.%(ext)s")
         ydl_opts = self._get_ydl_opts(output_path, url)
 
         try:
             result = await loop.run_in_executor(None, lambda: self._download_sync(url, ydl_opts))
+            if result.success and is_instagram_photo_candidate_url(url) and result.file_path:
+                frame_result = await loop.run_in_executor(
+                    None, lambda: self._extract_photo_frame(result)
+                )
+                if frame_result is not None:
+                    result = frame_result
             if result.success:
                 self.add_to_cache(url, result)
             return result
