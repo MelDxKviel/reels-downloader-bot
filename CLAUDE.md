@@ -51,7 +51,7 @@ There is no test suite in this repository.
 
 **URL caching**: Cache keys are MD5 hashes of normalized URLs (UTM params, `si`, `feature`, `ref` stripped). Cache entries are validated on startup and on miss (checks file existence). Instagram failures fall back to `kkinstagram.com` mirror.
 
-**YouTube cookies**: If `YT_COOKIES_FILE` is set, the file is validated for Netscape format before being passed to yt-dlp. Cookies are only applied to YouTube URLs, not other platforms. Invalid cookies trigger a retry without them.
+**Platform cookies**: `YT_COOKIES_FILE` and `INSTA_COOKIES_FILE` env vars point to Netscape-format cookie files for YouTube and Instagram respectively. Both are validated on use via `_looks_like_netscape_cookies_file()`. Cookies are applied per-platform in `_get_ydl_opts()` — YouTube gets `YT_COOKIES_FILE`, Instagram gets `INSTA_COOKIES_FILE`. Invalid or missing files are silently skipped with a warning; if yt-dlp rejects the cookiefile at runtime, the download is retried without it. See `COOKIES_GUIDE.md` for export instructions.
 
 **FSM command pattern**: `/download` and `/round` both use aiogram FSM. If a URL is passed inline (`/download <url>`), the download starts immediately. Otherwise the handler enters a waiting state and shows an inline cancel button. The cancel callback embeds the initiating `user_id` in its `callback_data` (`cancel_download:<id>`, `cancel_round`) so only the original user can dismiss the prompt in group chats. `download_cmd_router` is registered before `round_router` so `/download` is matched as a command even while a user is in `RoundStates.waiting_for_input`.
 
@@ -90,6 +90,7 @@ Two SQLAlchemy models defined in `src/services/database.py`:
 | `DATABASE_URL` | Yes | `postgresql+asyncpg://...` |
 | `DOWNLOAD_DIR` | No | Default: `downloads` |
 | `YT_COOKIES_FILE` | No | Netscape-format cookies for age-restricted YouTube |
+| `INSTA_COOKIES_FILE` | No | Netscape-format cookies for Instagram (private accounts, auth errors) |
 | `POSTGRES_PASSWORD` | Docker only | Default: `postgres` |
 
 ## Conventions

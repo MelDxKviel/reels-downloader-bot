@@ -21,12 +21,13 @@ from urllib.parse import urlparse
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
-from src.config import DOWNLOAD_DIR, MAX_FILE_SIZE, YT_COOKIES_FILE
+from src.config import DOWNLOAD_DIR, INSTA_COOKIES_FILE, MAX_FILE_SIZE, YT_COOKIES_FILE
 from src.services.url_utils import (
     build_kkinstagram_url,
     get_platform_name,
     get_url_hash,
     is_instagram_photo_candidate_url,
+    is_instagram_url,
     is_supported_url,
     is_youtube_url,
     should_retry_with_kkinstagram,
@@ -286,6 +287,19 @@ class VideoDownloader:
             )
             return None
         return YT_COOKIES_FILE
+
+    def _get_instagram_cookiefile(self) -> Optional[str]:
+        if not INSTA_COOKIES_FILE:
+            return None
+        if not os.path.exists(INSTA_COOKIES_FILE):
+            return None
+        if not self._looks_like_netscape_cookies_file(INSTA_COOKIES_FILE):
+            logger.warning(
+                "INSTA_COOKIES_FILE задан, но файл не похож на Netscape cookies формат — игнорирую: %s",
+                INSTA_COOKIES_FILE,
+            )
+            return None
+        return INSTA_COOKIES_FILE
 
     def _fetch_instagram_media_info(self, url: str) -> Optional[dict]:
         """
@@ -573,6 +587,10 @@ class VideoDownloader:
 
         if is_youtube_url(url):
             cookiefile = self._get_youtube_cookiefile()
+            if cookiefile:
+                opts["cookiefile"] = cookiefile
+        elif is_instagram_url(url):
+            cookiefile = self._get_instagram_cookiefile()
             if cookiefile:
                 opts["cookiefile"] = cookiefile
 
