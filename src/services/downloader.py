@@ -138,29 +138,6 @@ class VideoDownloader:
         entry["telegram_file_id"] = file_id
         self._save_cache()
 
-    def get_telegram_round_file_id(self, url: str) -> Optional[str]:
-        """Возвращает сохранённый Telegram file_id для round-видео, если есть."""
-        url_hash = get_url_hash(url)
-        entry = self.cache.get(url_hash)
-        if not entry:
-            return None
-        file_id = entry.get("telegram_round_file_id")
-        return file_id if isinstance(file_id, str) and file_id else None
-
-    def set_telegram_round_file_id(self, url: str, file_id: str) -> None:
-        """Сохраняет Telegram file_id для round-видео."""
-        if not file_id:
-            return
-        url_hash = get_url_hash(url)
-        entry = self.cache.get(url_hash)
-        if entry is None:
-            entry = {}
-            self.cache[url_hash] = entry
-        if entry.get("telegram_round_file_id") == file_id:
-            return
-        entry["telegram_round_file_id"] = file_id
-        self._save_cache()
-
     def get_telegram_mp3_file_id(self, url: str) -> Optional[str]:
         """Возвращает сохранённый Telegram file_id для MP3-аудио, если есть."""
         url_hash = get_url_hash(url)

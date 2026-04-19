@@ -2,7 +2,7 @@
 Inline-mode загрузка видео.
 
 Пользователь набирает `@bot_username <ссылка>` в любом чате — бот отвечает
-тремя inline-карточками: видео, кружок (512×512 mp4) и MP3.
+двумя inline-карточками: видео и MP3.
 Если результат уже есть в кэше, карточка превращается в готовый файл и
 Telegram отправляет его моментально. Иначе карточка отправляется как
 текстовая "заглушка", а после выбора (chosen_inline_result) бот скачивает
@@ -20,8 +20,6 @@ Telegram отправляет его моментально. Иначе карт
   или URL (multipart запрещён). Поэтому файл сначала отправляется в storage-чат
   (`VIDEO_STORAGE_CHAT_ID` или первый `ADMIN_USERS`), и только затем его file_id
   подставляется в editMessageMedia.
-- Кружок (round) отправляется как обычное квадратное видео 512×512, поскольку
-  Telegram Bot API не поддерживает video_note в inline-режиме.
 """
 
 import logging
@@ -51,7 +49,6 @@ from src.services.downloader import downloader
 from src.services.url_utils import get_url_hash
 
 from .mp3 import _convert_to_mp3
-from .round import _convert_to_round
 
 logger = logging.getLogger(__name__)
 
@@ -155,31 +152,6 @@ async def inline_query_handler(query: InlineQuery) -> None:
             )
         )
 
-    # --- Кружок ---
-    cached_round_id = downloader.get_telegram_round_file_id(url)
-    if cached_round_id:
-        results.append(
-            InlineQueryResultCachedVideo(
-                id=f"cached_round:{result_id}",
-                video_file_id=cached_round_id,
-                title=f"⭕ Кружок с {platform}",
-                description="Отправить как кружок (из кэша)",
-            )
-        )
-    else:
-        results.append(
-            InlineQueryResultArticle(
-                id=f"round:{result_id}",
-                title=f"⭕ Кружок с {platform}",
-                description="Конвертировать в формат кружка (512×512, макс 60 сек)",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"⏳ Конвертирую в кружок с <b>{platform}</b>...",
-                    parse_mode="HTML",
-                ),
-                reply_markup=LOADING_KEYBOARD,
-            )
-        )
-
     # --- MP3 ---
     cached_mp3_id = downloader.get_telegram_mp3_file_id(url)
     if cached_mp3_id:
@@ -218,8 +190,8 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
     """Докачивает медиа и заменяет текстовую заглушку на видео, кружок или MP3."""
     result_id = chosen.result_id or ""
 
-    # Быстрый путь (cached:*, cached_round:*, cached_mp3:*) — только статистика.
-    for prefix in ("cached:", "cached_round:", "cached_mp3:"):
+    # Быстрый путь (cached:*, cached_mp3:*) — только статистика.
+    for prefix in ("cached:", "cached_mp3:"):
         if result_id.startswith(prefix):
             url = _extract_url(chosen.query)
             if url:
@@ -233,7 +205,7 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
 
     # Определяем тип операции по префиксу result_id.
     operation: Optional[str] = None
-    for prefix in ("download:", "round:", "mp3:"):
+    for prefix in ("download:", "mp3:"):
         if result_id.startswith(prefix):
             operation = prefix.rstrip(":")
             break
@@ -278,9 +250,6 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
 
     if operation == "download":
         await _handle_video(bot, db, inline_message_id, url, platform, user_id, result.file_path)
-
-    elif operation == "round":
-        await _handle_round(bot, db, inline_message_id, url, platform, user_id, result.file_path)
 
     elif operation == "mp3":
         await _handle_mp3(
@@ -328,69 +297,6 @@ async def _handle_video(
 
     await db.record_download(user_id=user_id, platform=platform, url=url, success=True)
     logger.info("✅ Inline-видео отправлено (user: %s, url: %s)", user_id, url)
-
-
-async def _handle_round(
-    bot: Bot,
-    db: DatabaseService,
-    inline_message_id: str,
-    url: str,
-    platform: str,
-    user_id: int,
-    file_path: str,
-) -> None:
-    """Конвертирует в кружок (512×512), загружает в storage и подменяет inline-заглушку."""
-    round_path: Optional[str] = None
-    try:
-        round_path = await _convert_to_round(file_path)
-    except Exception as e:
-        logger.error("Ошибка конвертации в кружок (inline): %s", e, exc_info=True)
-
-    if not round_path:
-        await _safe_edit_text(
-            bot,
-            inline_message_id,
-            "❌ <b>Не удалось конвертировать в кружок</b>\n\nFFmpeg не найден или ошибка обработки.",
-        )
-        await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
-        return
-
-    try:
-        file_id = await _upload_video_and_get_file_id(bot, round_path)
-    finally:
-        try:
-            os.remove(round_path)
-        except Exception:
-            pass
-
-    if not file_id:
-        await _safe_edit_text(
-            bot,
-            inline_message_id,
-            "❌ <b>Не удалось опубликовать кружок</b>\n\n"
-            "Inline-storage не настроен. Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",
-        )
-        await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
-        return
-
-    downloader.set_telegram_round_file_id(url, file_id)
-
-    try:
-        await bot.edit_message_media(
-            inline_message_id=inline_message_id,
-            media=InputMediaVideo(media=file_id, supports_streaming=True),
-            reply_markup=None,
-        )
-    except Exception as e:
-        logger.error("Ошибка при editMessageMedia (кружок, inline): %s", e, exc_info=True)
-        await _safe_edit_text(
-            bot, inline_message_id, "❌ <b>Не удалось отправить кружок</b>\n\nПопробуйте позже."
-        )
-        await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
-        return
-
-    await db.record_download(user_id=user_id, platform=platform, url=url, success=True)
-    logger.info("✅ Inline-кружок отправлен (user: %s, url: %s)", user_id, url)
 
 
 async def _handle_mp3(
@@ -548,7 +454,3 @@ async def _upload_audio_and_get_file_id(
         logger.debug("Не удалось удалить промежуточное сообщение (аудио) из storage: %s", e)
 
     return file_id
-
-
-# Обратная совместимость: старое имя функции используется в тестах/других модулях.
-_upload_and_get_file_id = _upload_video_and_get_file_id
