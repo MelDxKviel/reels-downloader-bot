@@ -74,6 +74,18 @@ def is_instagram_post_url(url: str) -> bool:
     return bool(re.search(r"/(?:p|reel|reels|tv)/[^/?#]+", path, re.IGNORECASE))
 
 
+def is_instagram_photo_candidate_url(url: str) -> bool:
+    """
+    True only для URL вида /p/<shortcode> — такие посты могут быть фото или
+    каруселью фото. /reel/, /reels/ и /tv/ всегда видео, проверять их на
+    фото бессмысленно.
+    """
+    if not (is_instagram_url(url) or is_kkinstagram_url(url)):
+        return False
+    path = urlparse(url).path or ""
+    return bool(re.search(r"/p/[^/?#]+", path, re.IGNORECASE))
+
+
 def is_kkinstagram_url(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return host == "kkinstagram.com" or host.endswith(".kkinstagram.com")

@@ -26,7 +26,7 @@ from src.services.url_utils import (
     build_kkinstagram_url,
     get_platform_name,
     get_url_hash,
-    is_instagram_post_url,
+    is_instagram_photo_candidate_url,
     is_supported_url,
     is_youtube_url,
     should_retry_with_kkinstagram,
@@ -35,6 +35,10 @@ from src.services.url_utils import (
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_USER_AGENT = "TelegramBot (like TwitterBot)"
+
+# Telegram media groups accept от 2 до 10 элементов — карусели Instagram
+# могут содержать до 20 слайдов, остальные отбрасываем.
+MAX_CAROUSEL_ITEMS = 10
 
 
 @dataclass
@@ -48,6 +52,7 @@ class DownloadResult:
     error: Optional[str] = None
     from_cache: bool = False
     is_photo: bool = False
+    photo_paths: Optional[list] = None
 
 
 class VideoDownloader:
@@ -88,18 +93,38 @@ class VideoDownloader:
         return get_url_hash(url)
 
     def get_from_cache(self, url: str) -> Optional[DownloadResult]:
-        """Проверяет наличие видео в кэше."""
+        """Проверяет наличие видео/фото в кэше."""
         url_hash = get_url_hash(url)
         if url_hash in self.cache:
             cached = self.cache[url_hash]
             file_path = cached.get("file_path")
+            photo_paths_raw = cached.get("photo_paths")
+            is_photo = bool(cached.get("is_photo", False))
+
+            if is_photo and isinstance(photo_paths_raw, list) and photo_paths_raw:
+                existing = [p for p in photo_paths_raw if isinstance(p, str) and os.path.exists(p)]
+                if existing:
+                    return DownloadResult(
+                        success=True,
+                        file_path=existing[0],
+                        title=cached.get("title"),
+                        duration=cached.get("duration"),
+                        is_photo=True,
+                        photo_paths=existing,
+                        from_cache=True,
+                    )
+                del self.cache[url_hash]
+                self._save_cache()
+                return None
+
             if file_path and isinstance(file_path, str) and os.path.exists(file_path):
                 return DownloadResult(
                     success=True,
                     file_path=file_path,
                     title=cached.get("title"),
                     duration=cached.get("duration"),
-                    is_photo=bool(cached.get("is_photo", False)),
+                    is_photo=is_photo,
+                    photo_paths=[file_path] if is_photo else None,
                     from_cache=True,
                 )
             else:
@@ -120,6 +145,8 @@ class VideoDownloader:
             }
             if result.is_photo:
                 new_entry["is_photo"] = True
+                paths = result.photo_paths or [result.file_path]
+                new_entry["photo_paths"] = list(paths)
             if telegram_file_id:
                 new_entry["telegram_file_id"] = telegram_file_id
             self.cache[url_hash] = new_entry
@@ -146,6 +173,29 @@ class VideoDownloader:
         if entry.get("telegram_file_id") == file_id:
             return
         entry["telegram_file_id"] = file_id
+        self._save_cache()
+
+    def get_telegram_photo_file_id(self, url: str) -> Optional[str]:
+        """Возвращает сохранённый Telegram photo file_id для URL, если есть."""
+        url_hash = get_url_hash(url)
+        entry = self.cache.get(url_hash)
+        if not entry:
+            return None
+        file_id = entry.get("telegram_photo_file_id")
+        return file_id if isinstance(file_id, str) and file_id else None
+
+    def set_telegram_photo_file_id(self, url: str, file_id: str) -> None:
+        """Сохраняет Telegram photo file_id для URL (используется для inline-mode)."""
+        if not file_id:
+            return
+        url_hash = get_url_hash(url)
+        entry = self.cache.get(url_hash)
+        if entry is None:
+            entry = {}
+            self.cache[url_hash] = entry
+        if entry.get("telegram_photo_file_id") == file_id:
+            return
+        entry["telegram_photo_file_id"] = file_id
         self._save_cache()
 
     def get_telegram_mp3_file_id(self, url: str) -> Optional[str]:
@@ -217,71 +267,179 @@ class VideoDownloader:
             return None
         return YT_COOKIES_FILE
 
-    def _fetch_instagram_og_meta(self, url: str) -> Optional[dict]:
+    def _fetch_instagram_media_info(self, url: str) -> Optional[dict]:
         """
-        Запрашивает Instagram-страницу с User-Agent Telegram-бота и парсит OG-метатеги.
-        Если instagram.com недоступен или не отдал нужные данные — пробует kkinstagram.
-        Возвращает dict с ключами image_url, video_url, has_video, title или None.
+        Запрашивает Instagram-пост и собирает список изображений (для поддержки
+        каруселей), URL видео и заголовок. Пробует несколько эндпоинтов:
+        embed-страницу Instagram (там карусели рендерятся с несколькими <img>),
+        основную страницу и зеркало kkinstagram.
+        Возвращает dict с ключами image_urls (list), video_url, has_video, title
+        или None, если ничего полезного не удалось извлечь.
         """
-        candidates = [url]
+        shortcode = self._extract_ig_shortcode(url)
+
+        candidates: list[str] = []
+        if shortcode:
+            candidates.append(f"https://www.instagram.com/p/{shortcode}/embed/captioned")
+            candidates.append(f"https://www.instagram.com/p/{shortcode}/embed/")
+        candidates.append(url)
         kk = build_kkinstagram_url(url)
-        if kk and kk != url:
+        if kk and kk not in candidates:
             candidates.append(kk)
 
+        image_urls: list[str] = []
+        video_url: Optional[str] = None
+        has_video_marker = False
+        title: Optional[str] = None
+
         for candidate in candidates:
-            try:
-                req = urllib.request.Request(
-                    candidate,
-                    headers={
-                        "User-Agent": TELEGRAM_BOT_USER_AGENT,
-                        "Accept": "text/html,*/*;q=0.8",
-                    },
-                )
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    content_type = (resp.headers.get("Content-Type") or "").lower()
-                    if "html" not in content_type:
-                        continue
-                    raw = resp.read(2 * 1024 * 1024)
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
-                logger.debug("Instagram OG fetch failed for %s: %s", candidate, e)
+            html = self._http_get_html(candidate)
+            if not html:
                 continue
 
-            html = raw.decode("utf-8", errors="ignore")
-            meta = self._parse_og_meta(html)
-            if meta.get("image_url") or meta.get("video_url"):
-                return meta
-        return None
+            parsed = self._parse_instagram_html(html)
+            for img in parsed["image_urls"]:
+                if img not in image_urls:
+                    image_urls.append(img)
+            if parsed["video_url"] and not video_url:
+                video_url = parsed["video_url"]
+            if parsed.get("has_video_marker"):
+                has_video_marker = True
+            if parsed["title"] and not title:
+                title = parsed["title"]
 
-    @staticmethod
-    def _parse_og_meta(html: str) -> dict:
-        """Извлекает og:image, og:video и og:title из HTML-страницы."""
+            # Ранний выход: нашли видео или карусель из 2+ фото — дальше ходить не нужно.
+            if has_video_marker:
+                break
+            if len(image_urls) >= 2:
+                break
 
-        def extract(property_name: str) -> Optional[str]:
-            pattern1 = (
-                rf'<meta[^>]*?property=["\']{re.escape(property_name)}["\']'
-                r'[^>]*?content=["\']([^"\']*)["\']'
-            )
-            pattern2 = (
-                r'<meta[^>]*?content=["\']([^"\']*)["\']'
-                rf'[^>]*?property=["\']{re.escape(property_name)}["\']'
-            )
-            m = re.search(pattern1, html, re.IGNORECASE)
-            if m:
-                return html_lib.unescape(m.group(1))
-            m = re.search(pattern2, html, re.IGNORECASE)
-            if m:
-                return html_lib.unescape(m.group(1))
+        if not image_urls and not video_url:
             return None
 
-        video_url = extract("og:video") or extract("og:video:url") or extract("og:video:secure_url")
-        image_url = extract("og:image") or extract("og:image:url") or extract("og:image:secure_url")
-        title = extract("og:title")
         return {
-            "image_url": image_url,
+            "image_urls": image_urls[:MAX_CAROUSEL_ITEMS],
             "video_url": video_url,
-            "has_video": bool(video_url),
+            "has_video": has_video_marker,
             "title": title,
         }
+
+    @staticmethod
+    def _extract_ig_shortcode(url: str) -> Optional[str]:
+        path = urlparse(url).path or ""
+        m = re.search(r"/(?:p|reel|reels|tv)/([^/?#]+)", path, re.IGNORECASE)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _http_get_html(candidate: str) -> Optional[str]:
+        try:
+            req = urllib.request.Request(
+                candidate,
+                headers={
+                    "User-Agent": TELEGRAM_BOT_USER_AGENT,
+                    "Accept": "text/html,*/*;q=0.8",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                if "html" not in content_type:
+                    return None
+                raw = resp.read(4 * 1024 * 1024)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            logger.debug("HTML fetch failed for %s: %s", candidate, e)
+            return None
+        return raw.decode("utf-8", errors="ignore")
+
+    @classmethod
+    def _parse_instagram_html(cls, html: str) -> dict:
+        """
+        Возвращает dict: image_urls (list, порядок слайдов, дедуп),
+        video_url, title.
+        """
+        image_urls: list[str] = []
+
+        # 1) Все og:image (их может быть несколько на embed-странице).
+        for raw in cls._find_meta_contents(html, "og:image"):
+            cls._append_unique(image_urls, raw)
+        for raw in cls._find_meta_contents(html, "og:image:url"):
+            cls._append_unique(image_urls, raw)
+        for raw in cls._find_meta_contents(html, "og:image:secure_url"):
+            cls._append_unique(image_urls, raw)
+
+        # 2) display_url из встроенного JSON (Instagram хранит так каждый слайд).
+        for m in re.finditer(r'"display_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html):
+            cls._append_unique(image_urls, cls._decode_json_str(m.group(1)))
+
+        # 3) <img class="EmbeddedMediaImage" src="..."> на embed-странице.
+        for m in re.finditer(
+            r'<img[^>]+class=["\'][^"\']*EmbeddedMediaImage[^"\']*["\'][^>]+src=["\']([^"\']+)["\']',
+            html,
+            re.IGNORECASE,
+        ):
+            cls._append_unique(image_urls, html_lib.unescape(m.group(1)))
+        for m in re.finditer(
+            r'<img[^>]+src=["\']([^"\']+)["\'][^>]+class=["\'][^"\']*EmbeddedMediaImage[^"\']*["\']',
+            html,
+            re.IGNORECASE,
+        ):
+            cls._append_unique(image_urls, html_lib.unescape(m.group(1)))
+
+        video_contents = (
+            list(cls._find_meta_contents(html, "og:video"))
+            or list(cls._find_meta_contents(html, "og:video:url"))
+            or list(cls._find_meta_contents(html, "og:video:secure_url"))
+        )
+        video_url = video_contents[0] if video_contents else None
+
+        # Реелс/видеопост на embed-странице часто не отдаёт og:video, но в
+        # inline JSON присутствуют `"video_url":"..."` и/или `"is_video":true`.
+        # Поэтому этих маркеров хватает, чтобы не принять видео за фото.
+        if not video_url:
+            m = re.search(r'"video_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+            if m:
+                video_url = cls._decode_json_str(m.group(1))
+        has_video_marker = bool(video_url) or bool(re.search(r'"is_video"\s*:\s*true', html))
+
+        title_contents = list(cls._find_meta_contents(html, "og:title"))
+        title = title_contents[0] if title_contents else None
+
+        return {
+            "image_urls": image_urls,
+            "video_url": video_url,
+            "has_video_marker": has_video_marker,
+            "title": title,
+        }
+
+    @staticmethod
+    def _find_meta_contents(html: str, property_name: str):
+        pattern1 = (
+            rf'<meta[^>]*?property=["\']{re.escape(property_name)}["\']'
+            r'[^>]*?content=["\']([^"\']*)["\']'
+        )
+        pattern2 = (
+            r'<meta[^>]*?content=["\']([^"\']*)["\']'
+            rf'[^>]*?property=["\']{re.escape(property_name)}["\']'
+        )
+        for m in re.finditer(pattern1, html, re.IGNORECASE):
+            yield html_lib.unescape(m.group(1))
+        for m in re.finditer(pattern2, html, re.IGNORECASE):
+            yield html_lib.unescape(m.group(1))
+
+    @staticmethod
+    def _decode_json_str(raw: str) -> str:
+        """Декодирует строковое значение из JSON (экранированное \\/ и \\uXXXX)."""
+        try:
+            return json.loads(f'"{raw}"')
+        except (ValueError, json.JSONDecodeError):
+            return raw.replace("\\/", "/")
+
+    @staticmethod
+    def _append_unique(target: list, value: Optional[str]) -> None:
+        if not value:
+            return
+        value = value.strip()
+        if value and value not in target:
+            target.append(value)
 
     def _download_image_sync(self, image_url: str, output_base: str) -> Optional[str]:
         """
@@ -393,7 +551,7 @@ class VideoDownloader:
 
         loop = asyncio.get_event_loop()
 
-        if is_instagram_post_url(url):
+        if is_instagram_photo_candidate_url(url):
             photo_result = await loop.run_in_executor(None, lambda: self._try_instagram_photo(url))
             if photo_result is not None:
                 if photo_result.success:
@@ -414,23 +572,36 @@ class VideoDownloader:
 
     def _try_instagram_photo(self, url: str) -> Optional[DownloadResult]:
         """
-        Если Instagram-пост без видео (только фото или карусель фото),
-        скачивает первое фото через HTTP и возвращает DownloadResult(is_photo=True).
-        Возвращает None, если фото не обнаружено — тогда вызывающий код падает в обычный
-        video-flow через yt-dlp.
+        Если Instagram-пост без видео (фото или карусель фото), скачивает первые
+        10 фото и возвращает DownloadResult(is_photo=True, photo_paths=[...]).
+        Возвращает None, если фото не обнаружено — тогда вызывающий код падает в
+        обычный video-flow через yt-dlp.
         """
-        meta = self._fetch_instagram_og_meta(url)
-        if not meta or meta.get("has_video") or not meta.get("image_url"):
+        meta = self._fetch_instagram_media_info(url)
+        if not meta or meta.get("has_video") or not meta.get("image_urls"):
             return None
 
-        file_id = str(uuid.uuid4())[:8]
-        output_base = str(self.download_dir / file_id)
-        photo_path = self._download_image_sync(meta["image_url"], output_base)
-        if not photo_path:
+        image_urls = meta["image_urls"][:MAX_CAROUSEL_ITEMS]
+        batch_id = str(uuid.uuid4())[:8]
+        downloaded: list[str] = []
+        for idx, image_url in enumerate(image_urls):
+            suffix = f"_{idx}" if len(image_urls) > 1 else ""
+            output_base = str(self.download_dir / f"{batch_id}{suffix}")
+            path = self._download_image_sync(image_url, output_base)
+            if path:
+                downloaded.append(path)
+
+        if not downloaded:
             return None
 
         title = meta.get("title") or "Photo"
-        return DownloadResult(success=True, file_path=photo_path, title=title, is_photo=True)
+        return DownloadResult(
+            success=True,
+            file_path=downloaded[0],
+            title=title,
+            is_photo=True,
+            photo_paths=downloaded,
+        )
 
     def _download_sync(self, url: str, ydl_opts: dict) -> DownloadResult:
         """Синхронная функция скачивания для запуска в executor."""
@@ -628,14 +799,23 @@ class VideoDownloader:
     def clear_cache(self) -> int:
         """Очищает весь кэш и удаляет файлы. Возвращает количество удалённых файлов."""
         count = 0
-        for url_hash, data in list(self.cache.items()):
+        for data in list(self.cache.values()):
+            paths: list[str] = []
             file_path = data.get("file_path")
-            if file_path and isinstance(file_path, str) and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                    count += 1
-                except Exception:
-                    pass
+            if isinstance(file_path, str):
+                paths.append(file_path)
+            photo_paths = data.get("photo_paths")
+            if isinstance(photo_paths, list):
+                for p in photo_paths:
+                    if isinstance(p, str) and p not in paths:
+                        paths.append(p)
+            for p in paths:
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        count += 1
+                    except OSError:
+                        pass
         self.cache.clear()
         self._save_cache()
         return count

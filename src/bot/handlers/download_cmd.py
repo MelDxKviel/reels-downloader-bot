@@ -14,6 +14,7 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Message,
 )
 
@@ -83,7 +84,12 @@ async def _download_and_send(
 
     try:
         if result.is_photo:
-            await message.answer_photo(photo=FSInputFile(result.file_path))
+            photo_paths = result.photo_paths or [result.file_path]
+            if len(photo_paths) > 1:
+                media = [InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths]
+                await message.answer_media_group(media=media)
+            else:
+                await message.answer_photo(photo=FSInputFile(photo_paths[0]))
         else:
             sent = await message.answer_video(
                 video=FSInputFile(result.file_path), supports_streaming=True
