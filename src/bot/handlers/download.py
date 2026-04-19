@@ -54,33 +54,36 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
 
     # Отправляем сообщение о начале скачивания
     status_message = await message.answer(
-        f"⏳ Скачиваю видео с <b>{platform}</b>...\nЭто может занять некоторое время."
+        f"⏳ Скачиваю с <b>{platform}</b>...\nЭто может занять некоторое время."
     )
 
     try:
-        # Скачиваем видео
+        # Скачиваем видео или фото
         result: DownloadResult = await downloader.download(url)
 
         if not result.success:
             await status_message.edit_text(
-                f"❌ <b>Не удалось скачать видео</b>\n\nПричина: {result.error}"
+                f"❌ <b>Не удалось скачать</b>\n\nПричина: {result.error}"
             )
             return
 
+        media_label = "фото" if result.is_photo else "видео"
+
         # Обновляем статус
         if result.from_cache:
-            await status_message.edit_text("📤 Отправляю видео из кэша...")
+            await status_message.edit_text(f"📤 Отправляю {media_label} из кэша...")
         else:
-            await status_message.edit_text("📤 Отправляю видео...")
+            await status_message.edit_text(f"📤 Отправляю {media_label}...")
 
-        # Отправляем видео
-        video_file = FSInputFile(result.file_path)
-
-        sent = await message.answer_video(video=video_file, supports_streaming=True)
-
-        # Сохраняем Telegram file_id, чтобы inline-режим мог отдавать видео моментально
-        if sent.video and sent.video.file_id:
-            downloader.set_telegram_file_id(url, sent.video.file_id)
+        if result.is_photo:
+            await message.answer_photo(photo=FSInputFile(result.file_path))
+        else:
+            sent = await message.answer_video(
+                video=FSInputFile(result.file_path), supports_streaming=True
+            )
+            # Сохраняем Telegram file_id, чтобы inline-режим мог отдавать видео моментально
+            if sent.video and sent.video.file_id:
+                downloader.set_telegram_file_id(url, sent.video.file_id)
 
         # Удаляем сообщение о статусе
         await status_message.delete()
@@ -90,7 +93,7 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
         await db.record_download(user_id=user.id, platform=platform, url=url, success=True)
 
         logger.info(
-            f"✅ Видео успешно отправлено: {result.title} "
+            f"✅ {media_label.capitalize()} успешно отправлено: {result.title} "
             f"(пользователь: {message.from_user.id}, из кэша: {result.from_cache})"
         )
 

@@ -53,7 +53,7 @@ async def _download_and_send(
 ) -> None:
     platform = downloader.get_platform_name(url)
     await status_msg.edit_text(
-        f"⏳ Скачиваю видео с <b>{platform}</b>...\nЭто может занять некоторое время."
+        f"⏳ Скачиваю с <b>{platform}</b>...\nЭто может занять некоторое время."
     )
 
     try:
@@ -69,34 +69,39 @@ async def _download_and_send(
         return
 
     if not result.success:
-        await status_msg.edit_text(f"❌ <b>Не удалось скачать видео</b>\n\nПричина: {result.error}")
+        await status_msg.edit_text(f"❌ <b>Не удалось скачать</b>\n\nПричина: {result.error}")
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
         return
 
+    media_label = "фото" if result.is_photo else "видео"
     if result.from_cache:
-        await status_msg.edit_text("📤 Отправляю видео из кэша...")
+        await status_msg.edit_text(f"📤 Отправляю {media_label} из кэша...")
     else:
-        await status_msg.edit_text("📤 Отправляю видео...")
+        await status_msg.edit_text(f"📤 Отправляю {media_label}...")
 
     try:
-        sent = await message.answer_video(
-            video=FSInputFile(result.file_path), supports_streaming=True
-        )
-        if sent.video and sent.video.file_id:
-            downloader.set_telegram_file_id(url, sent.video.file_id)
+        if result.is_photo:
+            await message.answer_photo(photo=FSInputFile(result.file_path))
+        else:
+            sent = await message.answer_video(
+                video=FSInputFile(result.file_path), supports_streaming=True
+            )
+            if sent.video and sent.video.file_id:
+                downloader.set_telegram_file_id(url, sent.video.file_id)
         await status_msg.delete()
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=True
         )
         logger.info(
-            "✅ Видео отправлено (пользователь: %s, из кэша: %s)",
+            "✅ %s отправлено (пользователь: %s, из кэша: %s)",
+            media_label.capitalize(),
             message.from_user.id,
             result.from_cache,
         )
     except Exception as e:
-        logger.error("Ошибка при отправке видео: %s", e, exc_info=True)
+        logger.error("Ошибка при отправке: %s", e, exc_info=True)
         await status_msg.edit_text("❌ <b>Ошибка при отправке</b>\n\nПопробуйте позже.")
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False

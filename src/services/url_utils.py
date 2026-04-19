@@ -66,6 +66,14 @@ def is_instagram_url(url: str) -> bool:
     return host == "instagram.com" or host.endswith(".instagram.com")
 
 
+def is_instagram_post_url(url: str) -> bool:
+    """True for Instagram URLs pointing to a single post/reel/tv item."""
+    if not (is_instagram_url(url) or is_kkinstagram_url(url)):
+        return False
+    path = urlparse(url).path or ""
+    return bool(re.search(r"/(?:p|reel|reels|tv)/[^/?#]+", path, re.IGNORECASE))
+
+
 def is_kkinstagram_url(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return host == "kkinstagram.com" or host.endswith(".kkinstagram.com")
