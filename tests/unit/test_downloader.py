@@ -305,3 +305,307 @@ async def test_download_handles_file_too_large(tmp_path):
     assert not result.success
     assert "большой" in result.error or "MB" in result.error
     assert not big_video.exists()  # file should be deleted
+
+
+# ── telegram file id cache ────────────────────────────────────────────────────
+
+
+def test_set_and_get_telegram_file_id(tmp_path):
+    d = make_downloader(tmp_path)
+    url = "https://youtube.com/watch?v=abc"
+    assert d.get_telegram_file_id(url) is None
+
+    d.set_telegram_file_id(url, "file_id_123")
+    assert d.get_telegram_file_id(url) == "file_id_123"
+
+
+def test_set_telegram_file_id_noop_on_empty(tmp_path):
+    d = make_downloader(tmp_path)
+    url = "https://youtube.com/watch?v=abc"
+    d.set_telegram_file_id(url, "")
+    assert d.get_telegram_file_id(url) is None
+
+
+def test_set_telegram_file_id_noop_when_same(tmp_path):
+    """Setting the same file_id twice should not trigger a second cache save."""
+    d = make_downloader(tmp_path)
+    url = "https://youtube.com/watch?v=abc"
+    d.set_telegram_file_id(url, "file_id_abc")
+    with patch.object(d, "_save_cache") as mock_save:
+        d.set_telegram_file_id(url, "file_id_abc")
+    mock_save.assert_not_called()
+
+
+def test_set_and_get_telegram_photo_file_id(tmp_path):
+    d = make_downloader(tmp_path)
+    url = "https://www.instagram.com/p/ABC/"
+    assert d.get_telegram_photo_file_id(url) is None
+
+    d.set_telegram_photo_file_id(url, "photo_file_id_xyz")
+    assert d.get_telegram_photo_file_id(url) == "photo_file_id_xyz"
+
+
+def test_set_and_get_telegram_mp3_file_id(tmp_path):
+    d = make_downloader(tmp_path)
+    url = "https://youtube.com/watch?v=abc"
+    assert d.get_telegram_mp3_file_id(url) is None
+
+    d.set_telegram_mp3_file_id(url, "mp3_file_id_999")
+    assert d.get_telegram_mp3_file_id(url) == "mp3_file_id_999"
+
+
+# ── get_cached_media_type ─────────────────────────────────────────────────────
+
+
+def test_get_cached_media_type_none_for_unknown(tmp_path):
+    d = make_downloader(tmp_path)
+    assert d.get_cached_media_type("https://youtube.com/watch?v=miss") is None
+
+
+def test_get_cached_media_type_video(tmp_path):
+    d = make_downloader(tmp_path)
+    url = "https://youtube.com/watch?v=abc"
+    video = fake_video(tmp_path)
+    d.add_to_cache(url, DownloadResult(success=True, file_path=str(video), title="T"))
+    assert d.get_cached_media_type(url) == "video"
+
+
+def test_get_cached_media_type_photo(tmp_path):
+    d = make_downloader(tmp_path)
+    url = "https://www.instagram.com/p/ABC/"
+    photo = fake_video(tmp_path, "photo.jpg")
+    d.add_to_cache(
+        url,
+        DownloadResult(
+            success=True, file_path=str(photo), title="T", is_photo=True, photo_paths=[str(photo)]
+        ),
+    )
+    assert d.get_cached_media_type(url) == "photo"
+
+
+def test_get_cached_media_type_via_telegram_file_id(tmp_path):
+    d = make_downloader(tmp_path)
+    url = "https://youtube.com/watch?v=abc"
+    d.set_telegram_file_id(url, "file_id_123")
+    assert d.get_cached_media_type(url) == "video"
+
+
+# ── cache: photo entries ──────────────────────────────────────────────────────
+
+
+def test_add_and_get_photo_from_cache(tmp_path):
+    d = make_downloader(tmp_path)
+    photo = fake_video(tmp_path, "photo.jpg")
+    url = "https://www.instagram.com/p/ABC/"
+
+    d.add_to_cache(
+        url,
+        DownloadResult(
+            success=True, file_path=str(photo), title="P", is_photo=True, photo_paths=[str(photo)]
+        ),
+    )
+
+    result = d.get_from_cache(url)
+    assert result is not None
+    assert result.is_photo is True
+    assert result.photo_paths == [str(photo)]
+    assert result.from_cache is True
+
+
+def test_photo_cache_invalidated_when_files_deleted(tmp_path):
+    d = make_downloader(tmp_path)
+    photo = fake_video(tmp_path, "photo.jpg")
+    url = "https://www.instagram.com/p/ABC/"
+
+    d.add_to_cache(
+        url,
+        DownloadResult(
+            success=True, file_path=str(photo), title="P", is_photo=True, photo_paths=[str(photo)]
+        ),
+    )
+    photo.unlink()
+
+    assert d.get_from_cache(url) is None
+
+
+# ── _parse_instagram_html ─────────────────────────────────────────────────────
+
+
+def test_parse_instagram_html_extracts_og_image():
+    html = '<meta property="og:image" content="https://cdn.example.com/photo.jpg">'
+    result = VideoDownloader._parse_instagram_html(html)
+    assert "https://cdn.example.com/photo.jpg" in result["image_urls"]
+    assert result["has_video_marker"] is False
+
+
+def test_parse_instagram_html_detects_video_url():
+    html = '<meta property="og:video" content="https://cdn.example.com/video.mp4">'
+    result = VideoDownloader._parse_instagram_html(html)
+    assert result["video_url"] == "https://cdn.example.com/video.mp4"
+    assert result["has_video_marker"] is True
+
+
+def test_parse_instagram_html_detects_is_video_marker():
+    html = '{"is_video": true}'
+    result = VideoDownloader._parse_instagram_html(html)
+    assert result["has_video_marker"] is True
+
+
+def test_parse_instagram_html_extracts_title():
+    html = '<meta property="og:title" content="My Post Title">'
+    result = VideoDownloader._parse_instagram_html(html)
+    assert result["title"] == "My Post Title"
+
+
+def test_parse_instagram_html_deduplicates_images():
+    html = (
+        '<meta property="og:image" content="https://cdn.example.com/photo.jpg">'
+        '<meta property="og:image" content="https://cdn.example.com/photo.jpg">'
+    )
+    result = VideoDownloader._parse_instagram_html(html)
+    assert result["image_urls"].count("https://cdn.example.com/photo.jpg") == 1
+
+
+def test_parse_instagram_html_empty():
+    result = VideoDownloader._parse_instagram_html("")
+    assert result["image_urls"] == []
+    assert result["video_url"] is None
+    assert result["has_video_marker"] is False
+    assert result["title"] is None
+
+
+# ── _extract_ig_shortcode ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://www.instagram.com/p/ABC123/", "ABC123"),
+        ("https://www.instagram.com/reel/XYZ789/", "XYZ789"),
+        ("https://www.instagram.com/tv/DEF456/", "DEF456"),
+        ("https://www.instagram.com/reels/GHI012/", "GHI012"),
+    ],
+)
+def test_extract_ig_shortcode(url, expected):
+    assert VideoDownloader._extract_ig_shortcode(url) == expected
+
+
+def test_extract_ig_shortcode_returns_none_for_profile():
+    assert VideoDownloader._extract_ig_shortcode("https://www.instagram.com/user/") is None
+
+
+# ── download: cookie retry logic ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_download_retries_without_cookies_on_invalid_cookiefile(tmp_path):
+    """When yt-dlp rejects a cookies file, the download is retried without it."""
+    from yt_dlp.utils import DownloadError
+
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path, "video.mp4")
+    url = "https://youtube.com/watch?v=cookietest"
+
+    call_count = 0
+
+    def fake_extract(download_url, download=True):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise DownloadError("does not look like a netscape format cookies file")
+        return {"title": "Retried", "duration": 5.0}
+
+    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.side_effect = fake_extract
+        mock_ydl.prepare_filename.return_value = str(video)
+
+        # Inject a cookiefile so the retry branch is reachable.
+        original_get_ydl_opts = d._get_ydl_opts
+
+        def patched_get_ydl_opts(output_path, u):
+            opts = original_get_ydl_opts(output_path, u)
+            opts["cookiefile"] = "/fake/cookies.txt"
+            return opts
+
+        d._get_ydl_opts = patched_get_ydl_opts
+        result = await d.download(url)
+
+    assert result.success
+    assert call_count == 2
+
+
+# ── download: photo frame extraction ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_download_extracts_photo_frame_for_short_instagram_post(tmp_path):
+    """Instagram /p/ posts with duration<=1 should be returned as photos."""
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path, "downloaded.mp4")
+    photo = fake_video(tmp_path, "downloaded_photo.jpg")
+    url = "https://www.instagram.com/p/ABC123/"
+
+    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {"title": "Photo Post", "duration": 0.0}
+        mock_ydl.prepare_filename.return_value = str(video)
+
+        with patch.object(
+            d,
+            "_extract_photo_frame",
+            return_value=DownloadResult(
+                success=True,
+                file_path=str(photo),
+                title="Photo Post",
+                is_photo=True,
+                photo_paths=[str(photo)],
+            ),
+        ):
+            result = await d.download(url)
+
+    assert result.success
+    assert result.is_photo is True
+
+
+@pytest.mark.asyncio
+async def test_download_skips_photo_extraction_for_reel(tmp_path):
+    """/reel/ URLs are never treated as photo candidates."""
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path, "reel.mp4")
+    url = "https://www.instagram.com/reel/XYZ789/"
+
+    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {"title": "Reel", "duration": 0.0}
+        mock_ydl.prepare_filename.return_value = str(video)
+
+        with patch.object(d, "_extract_photo_frame") as mock_extract:
+            result = await d.download(url)
+
+    mock_extract.assert_not_called()
+    assert result.success
+    assert result.is_photo is False
+
+
+@pytest.mark.asyncio
+async def test_download_skips_photo_extraction_when_duration_above_threshold(tmp_path):
+    """/p/ posts with duration > 1s are treated as videos."""
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path, "longvideo.mp4")
+    url = "https://www.instagram.com/p/VIDEO123/"
+
+    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {"title": "Long", "duration": 30.0}
+        mock_ydl.prepare_filename.return_value = str(video)
+
+        with patch.object(d, "_extract_photo_frame") as mock_extract:
+            result = await d.download(url)
+
+    mock_extract.assert_not_called()
+    assert result.success
