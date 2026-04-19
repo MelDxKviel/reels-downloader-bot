@@ -130,8 +130,13 @@ async def inline_query_handler(query: InlineQuery) -> None:
     results = []
 
     # --- Видео/фото ---
-    cached_photo_id = downloader.get_telegram_photo_file_id(url)
-    cached_video_id = downloader.get_telegram_file_id(url)
+    # Фактический тип медиа берём из cache entry (is_photo), чтобы
+    # залежавшийся file_id другого типа не переключал выдачу.
+    cached_media_type = downloader.get_cached_media_type(url)
+    cached_photo_id = (
+        downloader.get_telegram_photo_file_id(url) if cached_media_type == "photo" else None
+    )
+    cached_video_id = downloader.get_telegram_file_id(url) if cached_media_type != "photo" else None
     if cached_photo_id:
         results.append(
             InlineQueryResultCachedPhoto(

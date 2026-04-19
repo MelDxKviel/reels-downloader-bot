@@ -175,6 +175,26 @@ class VideoDownloader:
         entry["telegram_file_id"] = file_id
         self._save_cache()
 
+    def get_cached_media_type(self, url: str) -> Optional[str]:
+        """
+        Возвращает фактический тип медиа для URL, как он сохранён в кэше:
+        "photo" или "video". None — если запись отсутствует или тип не
+        определён. Используется inline-хендлером, чтобы не спутать свежие
+        file_id с залежавшимися от предыдущего скачивания другого типа.
+        """
+        url_hash = get_url_hash(url)
+        entry = self.cache.get(url_hash)
+        if not entry:
+            return None
+        if entry.get("is_photo"):
+            return "photo"
+        file_path = entry.get("file_path")
+        if (isinstance(file_path, str) and file_path) or entry.get("telegram_file_id"):
+            return "video"
+        if entry.get("telegram_photo_file_id"):
+            return "photo"
+        return None
+
     def get_telegram_photo_file_id(self, url: str) -> Optional[str]:
         """Возвращает сохранённый Telegram photo file_id для URL, если есть."""
         url_hash = get_url_hash(url)
@@ -308,10 +328,13 @@ class VideoDownloader:
             if parsed["title"] and not title:
                 title = parsed["title"]
 
-            # Ранний выход: нашли видео или карусель из 2+ фото — дальше ходить не нужно.
+            # Ранний выход: уже точно видео или уже набрали максимум слайдов —
+            # дальше ходить по источникам бессмысленно. При 1–9 слайдах
+            # продолжаем обходить все источники: один endpoint иногда отдаёт
+            # только первый слайд, другой — полную карусель.
             if has_video_marker:
                 break
-            if len(image_urls) >= 2:
+            if len(image_urls) >= MAX_CAROUSEL_ITEMS:
                 break
 
         if not image_urls and not video_url:
