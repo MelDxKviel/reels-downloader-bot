@@ -653,11 +653,14 @@ class VideoDownloader:
         try:
             result = await loop.run_in_executor(None, lambda: self._download_sync(url, ydl_opts))
             if result.success and is_instagram_photo_candidate_url(url) and result.file_path:
-                frame_result = await loop.run_in_executor(
-                    None, lambda: self._extract_photo_frame(result)
-                )
-                if frame_result is not None:
-                    result = frame_result
+                # Only extract frame for photo posts (yt-dlp downloads them as 0-second videos).
+                # Real video posts on /p/ URLs have duration > 1 second.
+                if result.duration is None or result.duration <= 1.0:
+                    frame_result = await loop.run_in_executor(
+                        None, lambda: self._extract_photo_frame(result)
+                    )
+                    if frame_result is not None:
+                        result = frame_result
             if result.success:
                 self.add_to_cache(url, result)
             return result
