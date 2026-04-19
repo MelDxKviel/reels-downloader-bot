@@ -646,6 +646,13 @@ class VideoDownloader:
             return cached
 
         loop = asyncio.get_event_loop()
+
+        if is_instagram_photo_candidate_url(url):
+            photo_result = await loop.run_in_executor(None, lambda: self._try_instagram_photo(url))
+            if photo_result is not None:
+                self.add_to_cache(url, photo_result)
+                return photo_result
+
         file_id = str(uuid.uuid4())[:8]
         output_path = str(self.download_dir / f"{file_id}.%(ext)s")
         ydl_opts = self._get_ydl_opts(output_path, url)
@@ -653,10 +660,9 @@ class VideoDownloader:
         try:
             result = await loop.run_in_executor(None, lambda: self._download_sync(url, ydl_opts))
             if result.success and is_instagram_photo_candidate_url(url) and result.file_path:
-                # Only extract frame for photo posts (yt-dlp downloads them as 0-second videos).
-                # Real video posts have duration > 1s. Skip if duration is absent — unknown
-                # duration could mean a real video whose metadata was not returned.
-                if result.duration is not None and result.duration <= 1.0:
+                # Extract frame for photo posts (yt-dlp downloads them as 0-second videos).
+                # Also attempt for None duration — missing metadata on a /p/ post likely means photo.
+                if result.duration is None or result.duration <= 1.0:
                     frame_result = await loop.run_in_executor(
                         None, lambda: self._extract_photo_frame(result)
                     )
@@ -679,14 +685,19 @@ class VideoDownloader:
         if not meta or meta.get("has_video") or not meta.get("image_urls"):
             return None
 
+        # Reject login/consent/error pages: branding assets come from
+        # static.cdninstagram.com; actual post media comes from scontent* subdomains.
+        cdn_images = [u for u in meta["image_urls"] if "scontent" in (urlparse(u).hostname or "")]
+        if not cdn_images:
+            return None
+
         batch_id = str(uuid.uuid4())[:8]
         downloaded: list[str] = []
-        for image_url in meta["image_urls"]:
-            output_base = str(self.download_dir / batch_id)
+        for idx, image_url in enumerate(cdn_images):
+            output_base = str(self.download_dir / f"{batch_id}_{idx}")
             path = self._download_image_sync(image_url, output_base)
             if path:
                 downloaded.append(path)
-                break
 
         if not downloaded:
             return None
