@@ -37,8 +37,10 @@ from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedAudio,
+    InlineQueryResultCachedPhoto,
     InlineQueryResultCachedVideo,
     InputMediaAudio,
+    InputMediaPhoto,
     InputMediaVideo,
     InputTextMessageContent,
 )
@@ -127,14 +129,29 @@ async def inline_query_handler(query: InlineQuery) -> None:
     result_id = get_url_hash(url)
     results = []
 
-    # --- Видео ---
-    cached_video_id = downloader.get_telegram_file_id(url)
-    if cached_video_id:
+    # --- Видео/фото ---
+    # Фактический тип медиа берём из cache entry (is_photo), чтобы
+    # залежавшийся file_id другого типа не переключал выдачу.
+    cached_media_type = downloader.get_cached_media_type(url)
+    cached_photo_id = (
+        downloader.get_telegram_photo_file_id(url) if cached_media_type == "photo" else None
+    )
+    cached_video_id = downloader.get_telegram_file_id(url) if cached_media_type != "photo" else None
+    if cached_photo_id:
+        results.append(
+            InlineQueryResultCachedPhoto(
+                id=f"cached_photo:{result_id}",
+                photo_file_id=cached_photo_id,
+                title=f"🖼 Скачать с {platform}",
+                description="Отправить моментально (из кэша)",
+            )
+        )
+    elif cached_video_id:
         results.append(
             InlineQueryResultCachedVideo(
                 id=f"cached:{result_id}",
                 video_file_id=cached_video_id,
-                title=f"🎬 Видео с {platform}",
+                title=f"🎬 Скачать с {platform}",
                 description="Отправить моментально (из кэша)",
             )
         )
@@ -142,10 +159,10 @@ async def inline_query_handler(query: InlineQuery) -> None:
         results.append(
             InlineQueryResultArticle(
                 id=f"download:{result_id}",
-                title=f"📥 Скачать видео с {platform}",
+                title=f"📥 Скачать с {platform}",
                 description=url[:128],
                 input_message_content=InputTextMessageContent(
-                    message_text=f"⏳ Загружаю видео с <b>{platform}</b>...",
+                    message_text=f"⏳ Загружаю с <b>{platform}</b>...",
                     parse_mode="HTML",
                 ),
                 reply_markup=LOADING_KEYBOARD,
@@ -190,8 +207,8 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
     """Докачивает медиа и заменяет текстовую заглушку на видео, кружок или MP3."""
     result_id = chosen.result_id or ""
 
-    # Быстрый путь (cached:*, cached_mp3:*) — только статистика.
-    for prefix in ("cached:", "cached_mp3:"):
+    # Быстрый путь (cached:*, cached_photo:*, cached_mp3:*) — только статистика.
+    for prefix in ("cached:", "cached_photo:", "cached_mp3:"):
         if result_id.startswith(prefix):
             url = _extract_url(chosen.query)
             if url:
@@ -243,13 +260,22 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
         await _safe_edit_text(
             bot,
             inline_message_id,
-            f"❌ <b>Не удалось скачать видео</b>\n\nПричина: {result.error or 'неизвестная ошибка'}",
+            f"❌ <b>Не удалось скачать</b>\n\nПричина: {result.error or 'неизвестная ошибка'}",
         )
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
     if operation == "download":
-        await _handle_video(bot, db, inline_message_id, url, platform, user_id, result.file_path)
+        if result.is_photo:
+            # В inline Telegram не умеет редактировать сообщение в media group,
+            # поэтому для карусели отправляется только первый слайд.
+            await _handle_photo(
+                bot, db, inline_message_id, url, platform, user_id, result.file_path
+            )
+        else:
+            await _handle_video(
+                bot, db, inline_message_id, url, platform, user_id, result.file_path
+            )
 
     elif operation == "mp3":
         await _handle_mp3(
@@ -272,8 +298,8 @@ async def _handle_video(
         await _safe_edit_text(
             bot,
             inline_message_id,
-            "❌ <b>Не удалось опубликовать видео</b>\n\n"
-            "Inline-storage не настроен или видео не загрузилось. "
+            "❌ <b>Не удалось опубликовать</b>\n\n"
+            "Inline-storage не настроен или файл не загрузился. "
             "Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",
         )
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
@@ -290,13 +316,54 @@ async def _handle_video(
     except Exception as e:
         logger.error("Ошибка при editMessageMedia (видео, inline): %s", e, exc_info=True)
         await _safe_edit_text(
-            bot, inline_message_id, "❌ <b>Не удалось отправить видео</b>\n\nПопробуйте позже."
+            bot, inline_message_id, "❌ <b>Не удалось отправить</b>\n\nПопробуйте позже."
         )
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
     await db.record_download(user_id=user_id, platform=platform, url=url, success=True)
-    logger.info("✅ Inline-видео отправлено (user: %s, url: %s)", user_id, url)
+
+
+async def _handle_photo(
+    bot: Bot,
+    db: DatabaseService,
+    inline_message_id: str,
+    url: str,
+    platform: str,
+    user_id: int,
+    file_path: str,
+) -> None:
+    """Загружает фото в storage и подменяет inline-заглушку."""
+    file_id = await _upload_photo_and_get_file_id(bot, file_path)
+    if not file_id:
+        await _safe_edit_text(
+            bot,
+            inline_message_id,
+            "❌ <b>Не удалось опубликовать</b>\n\n"
+            "Inline-storage не настроен или файл не загрузился. "
+            "Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",
+        )
+        await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
+        return
+
+    downloader.set_telegram_photo_file_id(url, file_id)
+
+    try:
+        await bot.edit_message_media(
+            inline_message_id=inline_message_id,
+            media=InputMediaPhoto(media=file_id),
+            reply_markup=None,
+        )
+    except Exception as e:
+        logger.error("Ошибка при editMessageMedia (фото, inline): %s", e, exc_info=True)
+        await _safe_edit_text(
+            bot, inline_message_id, "❌ <b>Не удалось отправить</b>\n\nПопробуйте позже."
+        )
+        await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
+        return
+
+    await db.record_download(user_id=user_id, platform=platform, url=url, success=True)
+    logger.info("✅ Inline-фото отправлено (user: %s, url: %s)", user_id, url)
 
 
 async def _handle_mp3(
@@ -415,6 +482,43 @@ async def _upload_video_and_get_file_id(bot: Bot, file_path: str) -> Optional[st
         await bot.delete_message(chat_id=storage_chat_id, message_id=staging.message_id)
     except Exception as e:
         logger.debug("Не удалось удалить промежуточное сообщение в storage: %s", e)
+
+    return file_id
+
+
+async def _upload_photo_and_get_file_id(bot: Bot, file_path: str) -> Optional[str]:
+    """
+    Заливает фото в storage-чат и возвращает его Telegram file_id (наибольший размер).
+    Промежуточное сообщение удаляется (best-effort), file_id остаётся валидным.
+    """
+    storage_chat_id = _resolve_storage_chat_id()
+    if storage_chat_id is None:
+        logger.error("Нет VIDEO_STORAGE_CHAT_ID и ADMIN_USERS — inline не может опубликовать фото")
+        return None
+
+    try:
+        staging = await bot.send_photo(
+            chat_id=storage_chat_id,
+            photo=FSInputFile(file_path),
+            disable_notification=True,
+        )
+    except Exception as e:
+        logger.error(
+            "Не удалось выгрузить фото в storage-чат %s: %s", storage_chat_id, e, exc_info=True
+        )
+        return None
+
+    file_id: Optional[str] = None
+    if staging.photo:
+        # photo — массив размеров, берём самый большой (последний).
+        file_id = staging.photo[-1].file_id
+    if not file_id:
+        logger.error("Сообщение в storage-чате не содержит photo — file_id не получен")
+
+    try:
+        await bot.delete_message(chat_id=storage_chat_id, message_id=staging.message_id)
+    except Exception as e:
+        logger.debug("Не удалось удалить промежуточное сообщение (фото) из storage: %s", e)
 
     return file_id
 

@@ -6,7 +6,7 @@ import logging
 import re
 
 from aiogram import F, Router
-from aiogram.types import FSInputFile, Message
+from aiogram.types import FSInputFile, InputMediaPhoto, Message
 
 from src.services.database import DatabaseService
 from src.services.downloader import DownloadResult, downloader
@@ -76,7 +76,12 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
             await status_message.edit_text(f"📤 Отправляю {media_label}...")
 
         if result.is_photo:
-            await message.answer_photo(photo=FSInputFile(result.file_path))
+            photo_paths = result.photo_paths or [result.file_path]
+            if len(photo_paths) > 1:
+                media = [InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths]
+                await message.answer_media_group(media=media)
+            else:
+                await message.answer_photo(photo=FSInputFile(photo_paths[0]))
         else:
             sent = await message.answer_video(
                 video=FSInputFile(result.file_path), supports_streaming=True
