@@ -364,7 +364,6 @@ async def _handle_photo(
 
     await db.record_download(user_id=user_id, platform=platform, url=url, success=True)
     logger.info("✅ Inline-фото отправлено (user: %s, url: %s)", user_id, url)
-    logger.info("✅ Inline-видео отправлено (user: %s, url: %s)", user_id, url)
 
 
 async def _handle_mp3(
