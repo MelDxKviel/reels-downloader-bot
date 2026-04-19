@@ -604,15 +604,14 @@ class VideoDownloader:
         if not meta or meta.get("has_video") or not meta.get("image_urls"):
             return None
 
-        image_urls = meta["image_urls"][:MAX_CAROUSEL_ITEMS]
         batch_id = str(uuid.uuid4())[:8]
         downloaded: list[str] = []
-        for idx, image_url in enumerate(image_urls):
-            suffix = f"_{idx}" if len(image_urls) > 1 else ""
-            output_base = str(self.download_dir / f"{batch_id}{suffix}")
+        for image_url in meta["image_urls"]:
+            output_base = str(self.download_dir / batch_id)
             path = self._download_image_sync(image_url, output_base)
             if path:
                 downloaded.append(path)
+                break
 
         if not downloaded:
             return None
