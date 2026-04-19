@@ -4,14 +4,19 @@
 """
 
 import asyncio
+import html as html_lib
 import json
 import logging
 import os
+import re
 import shutil
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
+from urllib.parse import urlparse
 
 import yt_dlp
 from yt_dlp.utils import DownloadError
@@ -21,6 +26,7 @@ from src.services.url_utils import (
     build_kkinstagram_url,
     get_platform_name,
     get_url_hash,
+    is_instagram_post_url,
     is_supported_url,
     is_youtube_url,
     should_retry_with_kkinstagram,
@@ -41,6 +47,7 @@ class DownloadResult:
     duration: Optional[float] = None
     error: Optional[str] = None
     from_cache: bool = False
+    is_photo: bool = False
 
 
 class VideoDownloader:
@@ -92,6 +99,7 @@ class VideoDownloader:
                     file_path=file_path,
                     title=cached.get("title"),
                     duration=cached.get("duration"),
+                    is_photo=bool(cached.get("is_photo", False)),
                     from_cache=True,
                 )
             else:
@@ -110,6 +118,8 @@ class VideoDownloader:
                 "title": result.title,
                 "duration": result.duration,
             }
+            if result.is_photo:
+                new_entry["is_photo"] = True
             if telegram_file_id:
                 new_entry["telegram_file_id"] = telegram_file_id
             self.cache[url_hash] = new_entry
@@ -207,6 +217,127 @@ class VideoDownloader:
             return None
         return YT_COOKIES_FILE
 
+    def _fetch_instagram_og_meta(self, url: str) -> Optional[dict]:
+        """
+        Запрашивает Instagram-страницу с User-Agent Telegram-бота и парсит OG-метатеги.
+        Если instagram.com недоступен или не отдал нужные данные — пробует kkinstagram.
+        Возвращает dict с ключами image_url, video_url, has_video, title или None.
+        """
+        candidates = [url]
+        kk = build_kkinstagram_url(url)
+        if kk and kk != url:
+            candidates.append(kk)
+
+        for candidate in candidates:
+            try:
+                req = urllib.request.Request(
+                    candidate,
+                    headers={
+                        "User-Agent": TELEGRAM_BOT_USER_AGENT,
+                        "Accept": "text/html,*/*;q=0.8",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    content_type = (resp.headers.get("Content-Type") or "").lower()
+                    if "html" not in content_type:
+                        continue
+                    raw = resp.read(2 * 1024 * 1024)
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                logger.debug("Instagram OG fetch failed for %s: %s", candidate, e)
+                continue
+
+            html = raw.decode("utf-8", errors="ignore")
+            meta = self._parse_og_meta(html)
+            if meta.get("image_url") or meta.get("video_url"):
+                return meta
+        return None
+
+    @staticmethod
+    def _parse_og_meta(html: str) -> dict:
+        """Извлекает og:image, og:video и og:title из HTML-страницы."""
+
+        def extract(property_name: str) -> Optional[str]:
+            pattern1 = (
+                rf'<meta[^>]*?property=["\']{re.escape(property_name)}["\']'
+                r'[^>]*?content=["\']([^"\']*)["\']'
+            )
+            pattern2 = (
+                r'<meta[^>]*?content=["\']([^"\']*)["\']'
+                rf'[^>]*?property=["\']{re.escape(property_name)}["\']'
+            )
+            m = re.search(pattern1, html, re.IGNORECASE)
+            if m:
+                return html_lib.unescape(m.group(1))
+            m = re.search(pattern2, html, re.IGNORECASE)
+            if m:
+                return html_lib.unescape(m.group(1))
+            return None
+
+        video_url = extract("og:video") or extract("og:video:url") or extract("og:video:secure_url")
+        image_url = extract("og:image") or extract("og:image:url") or extract("og:image:secure_url")
+        title = extract("og:title")
+        return {
+            "image_url": image_url,
+            "video_url": video_url,
+            "has_video": bool(video_url),
+            "title": title,
+        }
+
+    def _download_image_sync(self, image_url: str, output_base: str) -> Optional[str]:
+        """
+        Скачивает картинку по прямой ссылке и сохраняет её рядом с output_base,
+        выбирая расширение по Content-Type или URL. Возвращает путь к файлу или None.
+        """
+        try:
+            req = urllib.request.Request(
+                image_url,
+                headers={
+                    "User-Agent": TELEGRAM_BOT_USER_AGENT,
+                    "Referer": "https://www.instagram.com/",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                if "jpeg" in content_type or "jpg" in content_type:
+                    ext = "jpg"
+                elif "png" in content_type:
+                    ext = "png"
+                elif "webp" in content_type:
+                    ext = "webp"
+                elif "heic" in content_type:
+                    ext = "heic"
+                else:
+                    path = urlparse(image_url).path
+                    ext = os.path.splitext(path)[1].lstrip(".").lower() or "jpg"
+                    if len(ext) > 5 or not ext.isalnum():
+                        ext = "jpg"
+
+                output_path = f"{output_base}.{ext}"
+                total = 0
+                with open(output_path, "wb") as f:
+                    while True:
+                        chunk = resp.read(64 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_FILE_SIZE:
+                            f.close()
+                            try:
+                                os.remove(output_path)
+                            except OSError:
+                                pass
+                            logger.warning(
+                                "Image exceeds MAX_FILE_SIZE (%s bytes), aborted: %s",
+                                total,
+                                image_url,
+                            )
+                            return None
+                        f.write(chunk)
+                return output_path
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            logger.warning("Не удалось скачать фото %s: %s", image_url, e)
+            return None
+
     def _get_ydl_opts(self, output_path: str, url: str) -> dict:
         """Возвращает опции для yt-dlp."""
         if self.has_ffmpeg:
@@ -260,18 +391,46 @@ class VideoDownloader:
         if cached:
             return cached
 
+        loop = asyncio.get_event_loop()
+
+        if is_instagram_post_url(url):
+            photo_result = await loop.run_in_executor(None, lambda: self._try_instagram_photo(url))
+            if photo_result is not None:
+                if photo_result.success:
+                    self.add_to_cache(url, photo_result)
+                return photo_result
+
         file_id = str(uuid.uuid4())[:8]
         output_path = str(self.download_dir / f"{file_id}.%(ext)s")
         ydl_opts = self._get_ydl_opts(output_path, url)
 
         try:
-            loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, lambda: self._download_sync(url, ydl_opts))
             if result.success:
                 self.add_to_cache(url, result)
             return result
         except Exception as e:
             return DownloadResult(success=False, error=f"Ошибка при скачивании: {str(e)}")
+
+    def _try_instagram_photo(self, url: str) -> Optional[DownloadResult]:
+        """
+        Если Instagram-пост без видео (только фото или карусель фото),
+        скачивает первое фото через HTTP и возвращает DownloadResult(is_photo=True).
+        Возвращает None, если фото не обнаружено — тогда вызывающий код падает в обычный
+        video-flow через yt-dlp.
+        """
+        meta = self._fetch_instagram_og_meta(url)
+        if not meta or meta.get("has_video") or not meta.get("image_url"):
+            return None
+
+        file_id = str(uuid.uuid4())[:8]
+        output_base = str(self.download_dir / file_id)
+        photo_path = self._download_image_sync(meta["image_url"], output_base)
+        if not photo_path:
+            return None
+
+        title = meta.get("title") or "Photo"
+        return DownloadResult(success=True, file_path=photo_path, title=title, is_photo=True)
 
     def _download_sync(self, url: str, ydl_opts: dict) -> DownloadResult:
         """Синхронная функция скачивания для запуска в executor."""
