@@ -396,17 +396,21 @@ class VideoDownloader:
         """
         image_urls: list[str] = []
 
-        # 1) Все og:image (их может быть несколько на embed-странице).
+        # 1) display_url из встроенного JSON. Это всегда оригинал без кропа и
+        # в правильном порядке слайдов карусели; все остальные источники ниже —
+        # фолбэки, и часто отдают квадратно обрезанный превью.
+        for m in re.finditer(r'"display_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html):
+            cls._append_unique(image_urls, cls._decode_json_str(m.group(1)))
+
+        # 2) og:image. На основной странице поста = display_url, но на
+        # /embed/ endpoint'ах Instagram подменяет на кроп 1080x1080
+        # (параметр stp=dst-jpg_e35_sNxN), поэтому ставим после display_url.
         for raw in cls._find_meta_contents(html, "og:image"):
             cls._append_unique(image_urls, raw)
         for raw in cls._find_meta_contents(html, "og:image:url"):
             cls._append_unique(image_urls, raw)
         for raw in cls._find_meta_contents(html, "og:image:secure_url"):
             cls._append_unique(image_urls, raw)
-
-        # 2) display_url из встроенного JSON (Instagram хранит так каждый слайд).
-        for m in re.finditer(r'"display_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html):
-            cls._append_unique(image_urls, cls._decode_json_str(m.group(1)))
 
         # 3) <img class="EmbeddedMediaImage" src="..."> на embed-странице.
         for m in re.finditer(
@@ -690,6 +694,23 @@ class VideoDownloader:
         cdn_images = [u for u in meta["image_urls"] if "scontent" in (urlparse(u).hostname or "")]
         if not cdn_images:
             return None
+
+        # Для одной и той же фотографии Instagram может отдать несколько
+        # URL — полноразмерный display_url и cropped превью из og:image с
+        # одинаковым filename, но разными query-параметрами (stp=...&oh=...).
+        # Ключ = hostname+path без query — гарантирует, что мы загрузим
+        # каждый реальный слайд ровно один раз (и выберем full-size, потому
+        # что display_url в списке идёт первым).
+        seen_paths: set[str] = set()
+        unique_images: list[str] = []
+        for u in cdn_images:
+            parsed = urlparse(u)
+            key = f"{parsed.hostname}{parsed.path}"
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            unique_images.append(u)
+        cdn_images = unique_images
 
         batch_id = str(uuid.uuid4())[:8]
         downloaded: list[str] = []
