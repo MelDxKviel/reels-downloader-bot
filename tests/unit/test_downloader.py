@@ -474,6 +474,33 @@ def test_parse_instagram_html_empty():
     assert result["title"] is None
 
 
+def test_is_resized_variant_detects_stp_size_marker():
+    assert VideoDownloader._is_resized_variant(
+        "https://scontent.cdninstagram.com/v/t51/photo.jpg?stp=dst-jpg_e35_s1080x1080&oh=a"
+    )
+    assert VideoDownloader._is_resized_variant(
+        "https://scontent.cdninstagram.com/v/t51/photo.jpg?stp=dst-jpg_e35_s640x640&oh=a"
+    )
+    assert not VideoDownloader._is_resized_variant(
+        "https://scontent.cdninstagram.com/v/t51/photo.jpg?stp=dst-jpg_e35&oh=a"
+    )
+    assert not VideoDownloader._is_resized_variant(
+        "https://scontent.cdninstagram.com/v/t51/photo.jpg"
+    )
+
+
+def test_parse_instagram_html_prefers_display_url_over_og_image():
+    # Embed pages put the uncropped original in display_url and a square-cropped
+    # preview in og:image — make sure display_url wins the ordering.
+    html = (
+        '<meta property="og:image" '
+        'content="https://scontent.cdninstagram.com/v/t51/photo.jpg?stp=s1080x1080">'
+        '{"display_url": "https://scontent.cdninstagram.com/v/t51/photo.jpg?stp=e35"}'
+    )
+    result = VideoDownloader._parse_instagram_html(html)
+    assert result["image_urls"][0] == "https://scontent.cdninstagram.com/v/t51/photo.jpg?stp=e35"
+
+
 # ── _extract_ig_shortcode ─────────────────────────────────────────────────────
 
 
