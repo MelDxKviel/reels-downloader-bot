@@ -698,27 +698,31 @@ class VideoDownloader:
         # Для одной и той же фотографии Instagram может отдать несколько
         # URL — полноразмерный display_url и cropped превью из og:image с
         # одинаковым filename, но разными query-параметрами (stp=...&oh=...).
-        # Ключ = hostname+path без query — гарантирует, что мы загрузим
-        # каждый реальный слайд ровно один раз (и выберем full-size, потому
-        # что display_url в списке идёт первым).
-        seen_paths: set[str] = set()
-        unique_images: list[str] = []
+        # Группируем по hostname+path: первый вариант в группе — предпочитаемый
+        # (display_url идёт в списке раньше og:image), остальные держим как
+        # fallback на случай, если подпись oh/oe у первого URL протухнет.
+        groups: list[list[str]] = []
+        groups_by_key: dict[str, list[str]] = {}
         for u in cdn_images:
             parsed = urlparse(u)
             key = f"{parsed.hostname}{parsed.path}"
-            if key in seen_paths:
-                continue
-            seen_paths.add(key)
-            unique_images.append(u)
-        cdn_images = unique_images
+            variants = groups_by_key.get(key)
+            if variants is None:
+                variants = [u]
+                groups_by_key[key] = variants
+                groups.append(variants)
+            else:
+                variants.append(u)
 
         batch_id = str(uuid.uuid4())[:8]
         downloaded: list[str] = []
-        for idx, image_url in enumerate(cdn_images):
+        for idx, variants in enumerate(groups):
             output_base = str(self.download_dir / f"{batch_id}_{idx}")
-            path = self._download_image_sync(image_url, output_base)
-            if path:
-                downloaded.append(path)
+            for variant_url in variants:
+                path = self._download_image_sync(variant_url, output_base)
+                if path:
+                    downloaded.append(path)
+                    break
 
         if not downloaded:
             return None
