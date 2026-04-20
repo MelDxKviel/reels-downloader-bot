@@ -476,6 +476,16 @@ class VideoDownloader:
             return raw.replace("\\/", "/")
 
     @staticmethod
+    def _is_resized_variant(url: str) -> bool:
+        """
+        Instagram кодирует обрезанные/уменьшенные варианты изображения в
+        параметре stp=...sNxN (либо cNxN) query-string. Оригинальный
+        display_url такой разметки не содержит. Используется для сортировки
+        вариантов одного и того же ассета: оригиналы вперёд, ресайзы сзади.
+        """
+        return bool(re.search(r"[?&]stp=[^&]*\d+x\d+", url))
+
+    @staticmethod
     def _append_unique(target: list, value: Optional[str]) -> None:
         if not value:
             return
@@ -698,9 +708,11 @@ class VideoDownloader:
         # Для одной и той же фотографии Instagram может отдать несколько
         # URL — полноразмерный display_url и cropped превью из og:image с
         # одинаковым filename, но разными query-параметрами (stp=...&oh=...).
-        # Группируем по hostname+path: первый вариант в группе — предпочитаемый
-        # (display_url идёт в списке раньше og:image), остальные держим как
-        # fallback на случай, если подпись oh/oe у первого URL протухнет.
+        # Группируем по hostname+path, затем внутри группы поднимаем наверх
+        # варианты без маркера ресайза: display_url обычно приходит раньше
+        # og:image, но при смешанных ответах endpoint'ов cropped вариант
+        # может оказаться первым — сортировка гарантирует full-size приоритет.
+        # Остальные варианты держим как fallback, если подпись oh/oe протухла.
         groups: list[list[str]] = []
         groups_by_key: dict[str, list[str]] = {}
         for u in cdn_images:
@@ -717,6 +729,7 @@ class VideoDownloader:
         batch_id = str(uuid.uuid4())[:8]
         downloaded: list[str] = []
         for idx, variants in enumerate(groups):
+            variants.sort(key=self._is_resized_variant)
             output_base = str(self.download_dir / f"{batch_id}_{idx}")
             for variant_url in variants:
                 path = self._download_image_sync(variant_url, output_base)
