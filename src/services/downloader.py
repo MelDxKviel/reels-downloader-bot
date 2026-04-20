@@ -38,6 +38,16 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_USER_AGENT = "TelegramBot (like TwitterBot)"
 
+# Для HTML-запросов используем десктопный браузерный UA: Instagram на UA
+# вида TelegramBot/WhatsApp отдаёт упрощённый link-preview без inline JSON,
+# а именно из JSON берётся полноразмерный display_url каждого слайда.
+# Без этого мы видим только og:image, который на embed/share-эндпоинтах
+# возвращается квадратно обрезанным (stp=dst-jpg_e35_s1080x1080).
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
 # Telegram media groups accept от 2 до 10 элементов — карусели Instagram
 # могут содержать до 20 слайдов, остальные отбрасываем.
 MAX_CAROUSEL_ITEMS = 10
@@ -374,8 +384,11 @@ class VideoDownloader:
             req = urllib.request.Request(
                 candidate,
                 headers={
-                    "User-Agent": TELEGRAM_BOT_USER_AGENT,
-                    "Accept": "text/html,*/*;q=0.8",
+                    "User-Agent": BROWSER_USER_AGENT,
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+                    ),
+                    "Accept-Language": "en-US,en;q=0.9",
                 },
             )
             with urllib.request.urlopen(req, timeout=15) as resp:
