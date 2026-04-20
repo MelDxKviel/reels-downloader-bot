@@ -25,7 +25,6 @@ Telegram отправляет его моментально. Иначе карт
 import html
 import logging
 import os
-import re
 from typing import Optional
 
 from aiogram import Bot, F, Router
@@ -49,21 +48,13 @@ from aiogram.types import (
 from src.config import ADMIN_USERS, VIDEO_STORAGE_CHAT_ID
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
-from src.services.url_utils import get_url_hash
+from src.services.url_utils import extract_url, get_url_hash
 
 from .mp3 import _convert_to_mp3
 
 logger = logging.getLogger(__name__)
 
 router = Router()
-
-URL_PATTERN = re.compile(
-    r"https?://(?:[\w-]+\.)*"
-    r"(?:youtube\.com|youtu\.be|instagram\.com|kkinstagram\.com"
-    r"|tiktok\.com|twitter\.com|x\.com)"
-    r'[^\s<>"\']*',
-    re.IGNORECASE,
-)
 
 LOADING_KEYBOARD = InlineKeyboardMarkup(
     inline_keyboard=[[InlineKeyboardButton(text="⏳ Загружается…", callback_data="inline_loading")]]
@@ -84,10 +75,7 @@ INVALID_MESSAGE = (
 
 
 def _extract_url(text: Optional[str]) -> Optional[str]:
-    if not text:
-        return None
-    match = URL_PATTERN.search(text)
-    return match.group(0) if match else None
+    return extract_url(text)
 
 
 @router.inline_query()

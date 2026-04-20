@@ -52,6 +52,18 @@ BROWSER_USER_AGENT = (
 # могут содержать до 20 слайдов, остальные отбрасываем.
 MAX_CAROUSEL_ITEMS = 10
 
+# Суффиксы хостов, с которых приходят настоящие Instagram-ассеты (scontent*).
+# Простая проверка "scontent" in host ловила бы произвольный домен вроде
+# scontent.evil.com — тут мы явно требуем доменную зону Facebook/Instagram CDN.
+_INSTAGRAM_CDN_HOST_SUFFIXES = (".cdninstagram.com", ".fbcdn.net")
+
+
+def _is_instagram_cdn_host(hostname: Optional[str]) -> bool:
+    if not hostname:
+        return False
+    host = hostname.lower()
+    return any(host.endswith(suffix) for suffix in _INSTAGRAM_CDN_HOST_SUFFIXES)
+
 
 @dataclass
 class DownloadResult:
@@ -656,7 +668,7 @@ class VideoDownloader:
                 is_photo=True,
                 photo_paths=[output_path],
             )
-        except (subprocess.TimeoutExpired, OSError, Exception) as e:
+        except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning("Frame extraction failed: %s", e)
             return None
 
@@ -714,7 +726,14 @@ class VideoDownloader:
 
         # Reject login/consent/error pages: branding assets come from
         # static.cdninstagram.com; actual post media comes from scontent* subdomains.
-        cdn_images = [u for u in meta["image_urls"] if "scontent" in (urlparse(u).hostname or "")]
+        # We require the scontent* prefix AND a trusted CDN suffix — the bare
+        # "scontent" substring check would accept arbitrary hosts like
+        # scontent.evil.com as long as they appeared in the parsed HTML.
+        cdn_images = []
+        for u in meta["image_urls"]:
+            host = (urlparse(u).hostname or "").lower()
+            if host.startswith("scontent") and _is_instagram_cdn_host(host):
+                cdn_images.append(u)
         if not cdn_images:
             return None
 

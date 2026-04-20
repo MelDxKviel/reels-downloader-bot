@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.services.downloader import DownloadResult, VideoDownloader
+from src.services.downloader import DownloadResult, VideoDownloader, _is_instagram_cdn_host
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -472,6 +472,34 @@ def test_parse_instagram_html_empty():
     assert result["video_url"] is None
     assert result["has_video_marker"] is False
     assert result["title"] is None
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "scontent.cdninstagram.com",
+        "scontent-iad3-1.cdninstagram.com",
+        "scontent-iad3-1.fbcdn.net",
+    ],
+)
+def test_is_instagram_cdn_host_accepts_real_cdn(host):
+    assert _is_instagram_cdn_host(host) is True
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        # Regression: "scontent" substring match would have accepted this.
+        "scontent.evil.com",
+        "scontent-iad3.malicious.org",
+        "notcdninstagram.com",
+        "example.com",
+        "",
+        None,
+    ],
+)
+def test_is_instagram_cdn_host_rejects_look_alikes(host):
+    assert _is_instagram_cdn_host(host) is False
 
 
 def test_is_resized_variant_detects_stp_size_marker():

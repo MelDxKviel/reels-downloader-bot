@@ -5,7 +5,7 @@ Pure URL utility functions: normalization, platform detection, Instagram fallbac
 import hashlib
 import re
 from typing import Optional
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 SUPPORTED_PATTERNS = [
     r"(youtube\.com|youtu\.be)",
@@ -25,10 +25,64 @@ INSTAGRAM_AUTH_ERROR_MARKERS = (
     "checkpoint_required",
 )
 
+# URL pattern shared by all text/inline handlers. The host alternatives are
+# anchored at a dot to avoid matching look-alike domains like notinstagram.com.
+URL_PATTERN = re.compile(
+    r"https?://(?:[\w-]+\.)*"
+    r"(?:youtube\.com|youtu\.be|instagram\.com|kkinstagram\.com"
+    r"|tiktok\.com|twitter\.com|x\.com)"
+    r'[^\s<>"\']*',
+    re.IGNORECASE,
+)
+
+# Punctuation we strip from the tail of a captured URL. Users commonly write
+# sentences like "смотри https://x.com/abc, круто", and the regex above would
+# otherwise greedily include the trailing comma/dot/quote.
+_TRAILING_URL_PUNCT = ".,;:!?)\"'»>]}"
+
+_TRACKING_PARAM_NAMES = frozenset({"si", "feature", "ref"})
+
+
+def _is_tracking_param(name: str) -> bool:
+    return name.startswith("utm_") or name in _TRACKING_PARAM_NAMES
+
 
 def normalize_url(url: str) -> str:
-    """Strip tracking parameters (utm_*, si, feature, ref) from a URL."""
-    return re.sub(r"[?&](utm_\w+|si|feature|ref)=[^&]*", "", url)
+    """Strip tracking parameters (utm_*, si, feature, ref) from a URL.
+
+    Uses a proper URL parser so that removing the first query parameter does
+    not leave a dangling ``&`` (the previous regex-only version produced
+    invalid URLs like ``?utm=x&v=y`` → ``&v=y``).
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    if not parsed.query:
+        return url
+    filtered = [
+        (name, value)
+        for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not _is_tracking_param(name)
+    ]
+    new_query = urlencode(filtered)
+    return urlunparse(parsed._replace(query=new_query))
+
+
+def extract_url(text: Optional[str]) -> Optional[str]:
+    """Return the first supported URL in ``text`` with trailing punctuation stripped.
+
+    Returns ``None`` if no match is found.
+    """
+    if not text:
+        return None
+    match = URL_PATTERN.search(text)
+    if not match:
+        return None
+    url = match.group(0)
+    while url and url[-1] in _TRAILING_URL_PUNCT:
+        url = url[:-1]
+    return url or None
 
 
 def get_url_hash(url: str) -> str:

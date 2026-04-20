@@ -3,7 +3,7 @@
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional, Tuple
 
 from aiogram import Bot, Router
@@ -11,7 +11,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from src.config import ADMIN_USERS
-from src.services.database import DatabaseService
+from src.services.database import DatabaseService, _utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -152,11 +152,12 @@ async def cmd_stats(message: Message, db: DatabaseService) -> None:
     stats = await db.get_global_stats()
 
     # Статистика за последние 24 часа
-    since_24h = datetime.utcnow() - timedelta(hours=24)
+    now = _utcnow()
+    since_24h = now - timedelta(hours=24)
     stats_24h = await db.get_global_stats(since=since_24h)
 
     # Статистика за последние 7 дней
-    since_7d = datetime.utcnow() - timedelta(days=7)
+    since_7d = now - timedelta(days=7)
     stats_7d = await db.get_global_stats(since=since_7d)
 
     text = (

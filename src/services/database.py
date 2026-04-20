@@ -3,7 +3,7 @@
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import BigInteger, Boolean, DateTime, String, Text, and_, func, select
@@ -13,6 +13,15 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from src.config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Return a naive UTC datetime, replacing deprecated ``datetime.utcnow()``.
+
+    Existing rows in the DB use naive UTC timestamps, so we drop tzinfo to
+    keep the column values comparable without a migration.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
@@ -29,7 +38,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class DownloadStats(Base):
@@ -42,7 +51,7 @@ class DownloadStats(Base):
     platform: Mapped[str] = mapped_column(String(50))
     url: Mapped[str] = mapped_column(Text)
     success: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class DatabaseService:

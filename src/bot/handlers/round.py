@@ -6,7 +6,6 @@ import asyncio
 import html
 import logging
 import os
-import re
 import shutil
 import uuid
 from pathlib import Path
@@ -27,6 +26,7 @@ from aiogram.types import (
 from src.config import DOWNLOAD_DIR
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
+from src.services.url_utils import extract_url
 
 logger = logging.getLogger(__name__)
 
@@ -34,22 +34,16 @@ router = Router()
 
 MAX_ROUND_DURATION = 60
 
-URL_PATTERN = re.compile(
-    r"https?://(?:www\.)?"
-    r"(?:youtube\.com|youtu\.be|instagram\.com|kkinstagram\.com"
-    r"|tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|twitter\.com|x\.com)"
-    r'[^\s<>"\']*',
-    re.IGNORECASE,
-)
-
 
 class RoundStates(StatesGroup):
     waiting_for_input = State()
 
 
-def _cancel_keyboard() -> InlineKeyboardMarkup:
+def _cancel_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_round")]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_round:{user_id}")]
+        ]
     )
 
 
@@ -188,10 +182,9 @@ async def cmd_round(message: Message, state: FSMContext, db: DatabaseService) ->
     parts = text.split(maxsplit=1)
     rest = parts[1].strip() if len(parts) > 1 else ""
 
-    match = URL_PATTERN.search(rest) if rest else None
+    url = extract_url(rest) if rest else None
 
-    if match:
-        url = match.group(0)
+    if url:
         await state.clear()
         status_msg = await message.answer("⏳ Обрабатываю...")
         await _download_and_send_round(message, db, status_msg, url)
@@ -200,15 +193,23 @@ async def cmd_round(message: Message, state: FSMContext, db: DatabaseService) ->
     prompt = await message.answer(
         "🎥 Отправьте ссылку на видео или mp4-файл.\n\n"
         "⏱ Максимальная длительность кружка: <b>60 секунд</b>",
-        reply_markup=_cancel_keyboard(),
+        reply_markup=_cancel_keyboard(message.from_user.id),
     )
     await state.set_state(RoundStates.waiting_for_input)
     await state.update_data(prompt_message_id=prompt.message_id)
 
 
-@router.callback_query(F.data == "cancel_round")
+@router.callback_query(F.data.startswith("cancel_round:"))
 async def cancel_round(callback: CallbackQuery, state: FSMContext) -> None:
-    """Отмена ожидания — убирает состояние и уведомляет пользователя."""
+    """Отмена ожидания — только инициатор может отменить."""
+    try:
+        owner_id = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if callback.from_user.id != owner_id:
+        await callback.answer("Это не ваша операция.", show_alert=True)
+        return
     await state.clear()
     await callback.message.edit_text("❌ Создание кружка отменено.")
     await callback.answer()
@@ -217,16 +218,14 @@ async def cancel_round(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(RoundStates.waiting_for_input, F.text)
 async def round_got_url(message: Message, state: FSMContext, db: DatabaseService) -> None:
     """Получена ссылка в режиме ожидания."""
-    text = message.text or ""
-    match = URL_PATTERN.search(text)
+    url = extract_url(message.text)
 
-    if not match:
+    if not url:
         await message.answer(
             "🤔 Ссылка не найдена. Отправьте ссылку на видео или нажмите ❌ для отмены."
         )
         return
 
-    url = match.group(0)
     data = await state.get_data()
     await state.clear()
 

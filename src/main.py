@@ -59,6 +59,8 @@ async def main() -> None:
     main_router.inline_query.middleware(UserAccessMiddleware(db))
     main_router.chosen_inline_result.middleware(DatabaseMiddleware(db))
     main_router.chosen_inline_result.middleware(UserAccessMiddleware(db))
+    main_router.callback_query.middleware(DatabaseMiddleware(db))
+    main_router.callback_query.middleware(UserAccessMiddleware(db))
 
     # Подключаем роутер
     dp.include_router(main_router)
