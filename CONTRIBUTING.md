@@ -38,7 +38,7 @@ Run both before committing. PRs with lint errors will not be merged.
 - **Emoji prefixes** on user-facing messages follow the pattern `✅ ❌ ⏳ 📤`. Match existing patterns when adding handlers.
 - **Database sessions** — always use `async with session:` context managers; never reuse a session across calls.
 - **Access checks** are enforced in `UserAccessMiddleware` before any handler runs — handlers must not re-check access.
-- **No test suite** exists yet. If you add one, target `tests/` and use `pytest-asyncio` (already in dev deps).
+- **Tests** live in `tests/unit/`. Run them with `uv run pytest tests/ -v --tb=short`. CI runs the same command on every PR — make sure tests pass locally before pushing.
 
 ## Database migrations
 
