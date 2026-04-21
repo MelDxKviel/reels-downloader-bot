@@ -6,12 +6,27 @@ import logging
 from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import BaseMiddleware
-from aiogram.types import TelegramObject
+from aiogram.types import CallbackQuery, TelegramObject
 
 from src.config import ADMIN_USERS
 from src.services.database import DatabaseService
 
 logger = logging.getLogger(__name__)
+
+
+async def _terminate_callback(event: TelegramObject) -> None:
+    """Acknowledge a denied CallbackQuery so the client stops showing a spinner.
+
+    Without this, Telegram clients wait ~30s for a callback response and then
+    display a generic timeout error. Called on access-denied branches where the
+    handler is skipped.
+    """
+    if isinstance(event, CallbackQuery):
+        try:
+            await event.answer("⛔ Нет доступа", show_alert=False)
+        except Exception:
+            # A stale callback can't be answered twice; swallow and move on.
+            pass
 
 
 class DatabaseMiddleware(BaseMiddleware):
@@ -50,6 +65,7 @@ class UserAccessMiddleware(BaseMiddleware):
 
         if user is None:
             logger.warning("Получено обновление без информации о пользователе")
+            await _terminate_callback(event)
             return
 
         # Администраторы всегда имеют доступ
@@ -66,4 +82,5 @@ class UserAccessMiddleware(BaseMiddleware):
             f"🚫 Доступ запрещён для пользователя: {user.full_name} "
             f"(ID: {user.id}, username: @{user.username}, event: {type(event).__name__})"
         )
+        await _terminate_callback(event)
         return

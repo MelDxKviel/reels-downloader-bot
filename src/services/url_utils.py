@@ -7,12 +7,19 @@ import re
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-SUPPORTED_PATTERNS = [
-    r"(youtube\.com|youtu\.be)",
-    r"(instagram\.com/reel|instagram\.com/p)",
-    r"(tiktok\.com|vm\.tiktok\.com)",
-    r"(twitter\.com|x\.com)",
-]
+# Hostnames (and their subdomains) that we will accept for downloading.
+# Matched against the parsed URL host, never against the raw string, so
+# look-alikes like ``youtube.com.evil.com`` cannot slip through.
+_SUPPORTED_HOSTS = frozenset(
+    {
+        "youtube.com",
+        "youtu.be",
+        "instagram.com",
+        "tiktok.com",
+        "twitter.com",
+        "x.com",
+    }
+)
 
 INSTAGRAM_AUTH_ERROR_MARKERS = (
     "sign in",
@@ -25,12 +32,16 @@ INSTAGRAM_AUTH_ERROR_MARKERS = (
     "checkpoint_required",
 )
 
-# URL pattern shared by all text/inline handlers. The host alternatives are
-# anchored at a dot to avoid matching look-alike domains like notinstagram.com.
+# URL pattern shared by all text/inline handlers. The lookahead after the
+# trusted host enforces a hostname boundary so look-alikes like
+# ``https://m.youtube.com.evil.com/path`` do NOT match as supported URLs —
+# without it the regex would greedily include the evil suffix in
+# ``[^\s<>"\']*`` and the match would reach the downloader.
 URL_PATTERN = re.compile(
     r"https?://(?:[\w-]+\.)*"
     r"(?:youtube\.com|youtu\.be|instagram\.com|kkinstagram\.com"
     r"|tiktok\.com|twitter\.com|x\.com)"
+    r"(?=[/:?#]|$)"
     r'[^\s<>"\']*',
     re.IGNORECASE,
 )
@@ -91,10 +102,18 @@ def get_url_hash(url: str) -> str:
 
 
 def is_supported_url(url: str) -> bool:
-    for pattern in SUPPORTED_PATTERNS:
-        if re.search(pattern, url, re.IGNORECASE):
-            return True
-    return False
+    """True if ``url`` points at a host we know how to download from.
+
+    Uses ``urlparse`` so look-alike domains (``youtube.com.evil.com``) are
+    rejected — substring matching is not safe here.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return any(host == base or host.endswith("." + base) for base in _SUPPORTED_HOSTS)
 
 
 def get_platform_name(url: str) -> str:

@@ -138,6 +138,36 @@ def test_is_supported_url_false(url):
     assert is_supported_url(url) is False
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Look-alike hosts must be rejected — the trusted name is only part of a
+        # longer, attacker-controlled hostname.
+        "https://youtube.com.evil.com/watch?v=abc",
+        "https://m.youtube.com.evil.com/watch?v=abc",
+        "https://evil.com/?fake=youtube.com",
+        "https://notinstagram.com/reel/abc/",
+        "https://x.com.evil.com/status/123",
+        "https://tiktok.com.phish.io/@user/video/123",
+    ],
+)
+def test_is_supported_url_rejects_lookalike_hosts(url):
+    assert is_supported_url(url) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://m.youtube.com.evil.com/watch?v=abc",
+        "смотри https://youtube.com.attacker.test/watch?v=abc",
+        "https://instagram.com.phish.example/reel/abc/",
+    ],
+)
+def test_extract_url_rejects_lookalike_hosts(text):
+    """Regression: hostname boundary lookahead must prevent suffix injection."""
+    assert extract_url(text) is None
+
+
 # --- get_platform_name ---
 
 
