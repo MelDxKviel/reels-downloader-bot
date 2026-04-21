@@ -130,8 +130,16 @@ def get_platform_name(url: str) -> str:
 
 
 def is_youtube_url(url: str) -> bool:
-    url_lower = url.lower()
-    return "youtube.com" in url_lower or "youtu.be" in url_lower
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return (
+        host == "youtube.com"
+        or host.endswith(".youtube.com")
+        or host == "youtu.be"
+        or host.endswith(".youtu.be")
+    )
 
 
 def is_instagram_url(url: str) -> bool:
