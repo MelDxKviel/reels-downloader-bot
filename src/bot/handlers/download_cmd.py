@@ -4,7 +4,6 @@
 
 import html
 import logging
-import re
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -21,18 +20,11 @@ from aiogram.types import (
 
 from src.services.database import DatabaseService
 from src.services.downloader import DownloadResult, downloader
+from src.services.url_utils import extract_url
 
 logger = logging.getLogger(__name__)
 
 router = Router()
-
-URL_PATTERN = re.compile(
-    r"https?://(?:www\.)?"
-    r"(?:youtube\.com|youtu\.be|instagram\.com|kkinstagram\.com"
-    r"|tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|twitter\.com|x\.com)"
-    r'[^\s<>"\']*',
-    re.IGNORECASE,
-)
 
 
 class DownloadStates(StatesGroup):
@@ -122,10 +114,9 @@ async def cmd_download(message: Message, state: FSMContext, db: DatabaseService)
     parts = text.split(maxsplit=1)
     rest = parts[1].strip() if len(parts) > 1 else ""
 
-    match = URL_PATTERN.search(rest) if rest else None
+    url = extract_url(rest) if rest else None
 
-    if match:
-        url = match.group(0)
+    if url:
         await state.clear()
         status_msg = await message.answer("⏳ Обрабатываю...")
         await _download_and_send(message, db, status_msg, url)
@@ -152,16 +143,14 @@ async def cancel_download(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(DownloadStates.waiting_for_url, F.text)
 async def download_got_url(message: Message, state: FSMContext, db: DatabaseService) -> None:
-    text = message.text or ""
-    match = URL_PATTERN.search(text)
+    url = extract_url(message.text)
 
-    if not match:
+    if not url:
         await message.answer(
             "🤔 Ссылка не найдена. Отправьте ссылку на видео или нажмите ❌ для отмены."
         )
         return
 
-    url = match.group(0)
     data = await state.get_data()
     await state.clear()
 

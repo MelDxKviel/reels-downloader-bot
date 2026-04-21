@@ -4,7 +4,6 @@
 
 import html
 import logging
-import re
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -12,18 +11,11 @@ from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, Mess
 
 from src.services.database import DatabaseService
 from src.services.downloader import DownloadResult, downloader
+from src.services.url_utils import extract_url
 
 logger = logging.getLogger(__name__)
 
 router = Router()
-
-# Регулярное выражение для поиска URL в тексте
-URL_PATTERN = re.compile(
-    r"https?://(?:www\.)?"
-    r"(?:youtube\.com|youtu\.be|instagram\.com|kkinstagram\.com|tiktok\.com|vt\.tiktok\.com|vm\.tiktok\.com|twitter\.com|x\.com)"
-    r'[^\s<>"\']*',
-    re.IGNORECASE,
-)
 
 
 @router.message(F.text)
@@ -32,9 +24,9 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
     text = message.text
 
     # Ищем URL в тексте
-    match = URL_PATTERN.search(text)
+    url = extract_url(text)
 
-    if not match:
+    if not url:
         # Проверяем, похоже ли сообщение на ссылку
         if any(
             domain in text.lower()
@@ -51,7 +43,6 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
             )
         return
 
-    url = match.group(0)
     platform = downloader.get_platform_name(url)
 
     # Отправляем сообщение о начале скачивания

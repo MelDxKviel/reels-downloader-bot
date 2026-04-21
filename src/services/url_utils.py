@@ -5,14 +5,21 @@ Pure URL utility functions: normalization, platform detection, Instagram fallbac
 import hashlib
 import re
 from typing import Optional
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-SUPPORTED_PATTERNS = [
-    r"(youtube\.com|youtu\.be)",
-    r"(instagram\.com/reel|instagram\.com/p)",
-    r"(tiktok\.com|vm\.tiktok\.com)",
-    r"(twitter\.com|x\.com)",
-]
+# Hostnames (and their subdomains) that we will accept for downloading.
+# Matched against the parsed URL host, never against the raw string, so
+# look-alikes like ``youtube.com.evil.com`` cannot slip through.
+_SUPPORTED_HOSTS = frozenset(
+    {
+        "youtube.com",
+        "youtu.be",
+        "instagram.com",
+        "tiktok.com",
+        "twitter.com",
+        "x.com",
+    }
+)
 
 INSTAGRAM_AUTH_ERROR_MARKERS = (
     "sign in",
@@ -25,10 +32,68 @@ INSTAGRAM_AUTH_ERROR_MARKERS = (
     "checkpoint_required",
 )
 
+# URL pattern shared by all text/inline handlers. The lookahead after the
+# trusted host enforces a hostname boundary so look-alikes like
+# ``https://m.youtube.com.evil.com/path`` do NOT match as supported URLs —
+# without it the regex would greedily include the evil suffix in
+# ``[^\s<>"\']*`` and the match would reach the downloader.
+URL_PATTERN = re.compile(
+    r"https?://(?:[\w-]+\.)*"
+    r"(?:youtube\.com|youtu\.be|instagram\.com|kkinstagram\.com"
+    r"|tiktok\.com|twitter\.com|x\.com)"
+    r"(?=[/:?#]|$)"
+    r'[^\s<>"\']*',
+    re.IGNORECASE,
+)
+
+# Punctuation we strip from the tail of a captured URL. Users commonly write
+# sentences like "смотри https://x.com/abc, круто", and the regex above would
+# otherwise greedily include the trailing comma/dot/quote.
+_TRAILING_URL_PUNCT = ".,;:!?)\"'»>]}"
+
+_TRACKING_PARAM_NAMES = frozenset({"si", "feature", "ref"})
+
+
+def _is_tracking_param(name: str) -> bool:
+    return name.startswith("utm_") or name in _TRACKING_PARAM_NAMES
+
 
 def normalize_url(url: str) -> str:
-    """Strip tracking parameters (utm_*, si, feature, ref) from a URL."""
-    return re.sub(r"[?&](utm_\w+|si|feature|ref)=[^&]*", "", url)
+    """Strip tracking parameters (utm_*, si, feature, ref) from a URL.
+
+    Uses a proper URL parser so that removing the first query parameter does
+    not leave a dangling ``&`` (the previous regex-only version produced
+    invalid URLs like ``?utm=x&v=y`` → ``&v=y``).
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    if not parsed.query:
+        return url
+    filtered = [
+        (name, value)
+        for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not _is_tracking_param(name)
+    ]
+    new_query = urlencode(filtered)
+    return urlunparse(parsed._replace(query=new_query))
+
+
+def extract_url(text: Optional[str]) -> Optional[str]:
+    """Return the first supported URL in ``text`` with trailing punctuation stripped.
+
+    Returns ``None`` if no match is found.
+    """
+    if not text:
+        return None
+    match = URL_PATTERN.search(text)
+    if not match:
+        return None
+    url = match.group(0)
+    while url and url[-1] in _TRAILING_URL_PUNCT:
+        url = url[:-1]
+    return url or None
 
 
 def get_url_hash(url: str) -> str:
@@ -37,10 +102,18 @@ def get_url_hash(url: str) -> str:
 
 
 def is_supported_url(url: str) -> bool:
-    for pattern in SUPPORTED_PATTERNS:
-        if re.search(pattern, url, re.IGNORECASE):
-            return True
-    return False
+    """True if ``url`` points at a host we know how to download from.
+
+    Uses ``urlparse`` so look-alike domains (``youtube.com.evil.com``) are
+    rejected — substring matching is not safe here.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return any(host == base or host.endswith("." + base) for base in _SUPPORTED_HOSTS)
 
 
 def get_platform_name(url: str) -> str:

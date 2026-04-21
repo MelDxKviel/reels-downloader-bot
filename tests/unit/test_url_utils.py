@@ -3,6 +3,7 @@ import pytest
 from src.services.url_utils import (
     INSTAGRAM_AUTH_ERROR_MARKERS,
     build_kkinstagram_url,
+    extract_url,
     get_platform_name,
     get_url_hash,
     is_instagram_photo_candidate_url,
@@ -47,6 +48,36 @@ def test_normalize_url_keeps_video_id():
 def test_normalize_url_unchanged_when_no_tracking():
     url = "https://youtube.com/watch?v=abc123"
     assert normalize_url(url) == url
+
+
+def test_normalize_url_first_param_is_tracking():
+    """Regression: stripping the first param should not leave a dangling '&'."""
+    url = "https://youtube.com/watch?utm_source=x&v=abc"
+    normalized = normalize_url(url)
+    assert "v=abc" in normalized
+    assert "utm_source" not in normalized
+    # The query separator must still be '?', not '&'.
+    assert "?&" not in normalized
+    assert normalized.count("?") == 1
+
+
+# --- extract_url ---
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("смотри https://x.com/user/status/123, круто", "https://x.com/user/status/123"),
+        ("(https://youtu.be/abc)", "https://youtu.be/abc"),
+        ("вот тут: https://www.instagram.com/reel/ABC/.", "https://www.instagram.com/reel/ABC/"),
+        ("перед точкой https://youtu.be/abc.", "https://youtu.be/abc"),
+        ("без ссылки совсем", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_extract_url_strips_trailing_punctuation(text, expected):
+    assert extract_url(text) == expected
 
 
 # --- get_url_hash ---
@@ -105,6 +136,36 @@ def test_is_supported_url_true(url):
 )
 def test_is_supported_url_false(url):
     assert is_supported_url(url) is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Look-alike hosts must be rejected — the trusted name is only part of a
+        # longer, attacker-controlled hostname.
+        "https://youtube.com.evil.com/watch?v=abc",
+        "https://m.youtube.com.evil.com/watch?v=abc",
+        "https://evil.com/?fake=youtube.com",
+        "https://notinstagram.com/reel/abc/",
+        "https://x.com.evil.com/status/123",
+        "https://tiktok.com.phish.io/@user/video/123",
+    ],
+)
+def test_is_supported_url_rejects_lookalike_hosts(url):
+    assert is_supported_url(url) is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://m.youtube.com.evil.com/watch?v=abc",
+        "смотри https://youtube.com.attacker.test/watch?v=abc",
+        "https://instagram.com.phish.example/reel/abc/",
+    ],
+)
+def test_extract_url_rejects_lookalike_hosts(text):
+    """Regression: hostname boundary lookahead must prevent suffix injection."""
+    assert extract_url(text) is None
 
 
 # --- get_platform_name ---
