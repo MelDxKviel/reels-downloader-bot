@@ -121,13 +121,23 @@ def get_platform_name(url: str) -> str:
         host = (urlparse(url).hostname or "").lower()
     except ValueError:
         return "Unknown"
-    if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be" or host.endswith(".youtu.be"):
+    if (
+        host == "youtube.com"
+        or host.endswith(".youtube.com")
+        or host == "youtu.be"
+        or host.endswith(".youtu.be")
+    ):
         return "YouTube"
     if host == "instagram.com" or host.endswith(".instagram.com"):
         return "Instagram"
     if host == "tiktok.com" or host.endswith(".tiktok.com"):
         return "TikTok"
-    if host == "twitter.com" or host.endswith(".twitter.com") or host == "x.com" or host.endswith(".x.com"):
+    if (
+        host == "twitter.com"
+        or host.endswith(".twitter.com")
+        or host == "x.com"
+        or host.endswith(".x.com")
+    ):
         return "X/Twitter"
     return "Unknown"
 
