@@ -256,10 +256,12 @@ def test_is_kkinstagram_url_false():
 
 
 def test_build_kkinstagram_url_replaces_host():
+    from urllib.parse import urlparse
+
     url = "https://www.instagram.com/reel/ABC123/"
     result = build_kkinstagram_url(url)
     assert result is not None
-    assert "kkinstagram.com" in result
+    assert urlparse(result).hostname == "kkinstagram.com"
     assert "/reel/ABC123/" in result
 
 
