@@ -117,14 +117,17 @@ def is_supported_url(url: str) -> bool:
 
 
 def get_platform_name(url: str) -> str:
-    url_lower = url.lower()
-    if "youtube.com" in url_lower or "youtu.be" in url_lower:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return "Unknown"
+    if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be" or host.endswith(".youtu.be"):
         return "YouTube"
-    elif "instagram.com" in url_lower:
+    if host == "instagram.com" or host.endswith(".instagram.com"):
         return "Instagram"
-    elif "tiktok.com" in url_lower:
+    if host == "tiktok.com" or host.endswith(".tiktok.com"):
         return "TikTok"
-    elif "twitter.com" in url_lower or "x.com" in url_lower:
+    if host == "twitter.com" or host.endswith(".twitter.com") or host == "x.com" or host.endswith(".x.com"):
         return "X/Twitter"
     return "Unknown"
 
