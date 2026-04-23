@@ -20,7 +20,6 @@
 - [Запуск через Docker](#-запуск-через-docker-compose)
 - [Команды бота](#-команды-бота)
 - [Cookies (YouTube и Instagram)](#-cookies-youtube-и-instagram)
-- [Архитектура](#-архитектура)
 
 ---
 
@@ -241,43 +240,3 @@ services:
 
 > ⚠️ Cookies привязаны к сеансу браузера и могут истекать — при ошибках авторизации повторите экспорт.
 
----
-
-## 🏗️ Архитектура
-
-```
-Telegram Update
-      │
-      ▼
-DatabaseMiddleware          ← инжектит DatabaseService в хендлеры
-      │
-      ▼
-UserAccessMiddleware        ← проверяет whitelist, дропает неразрешённых
-      │
-      ▼
-Router (приоритет):
-  admin_router              ← /adduser, /removeuser, /stats ...
-  common_router             ← /start, /help, /id, /cache ...
-  download_cmd_router       ← /download (FSM)
-  round_router              ← /round (FSM + FFmpeg)
-  download_router           ← авто-детект URL в сообщениях
-  inline_router             ← inline_query + chosen_inline_result
-      │
-      ▼
-VideoDownloader.download()  ← проверяет кэш → yt-dlp в thread executor
-      │
-      ▼
-Telegram (отправка файла)   ← DatabaseService.record_download()
-```
-
-**Стек технологий:**
-
-| Компонент | Технология |
-|---|---|
-| Bot framework | [aiogram 3.x](https://docs.aiogram.dev/) (async) |
-| Загрузчик видео | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (sync, через executor) |
-| База данных | PostgreSQL 17 + SQLAlchemy async ORM |
-| Миграции | Alembic |
-| Контейнеризация | Docker Compose |
-| Управление зависимостями | [uv](https://docs.astral.sh/uv/) |
-| Линтер | [ruff](https://docs.astral.sh/ruff/) |
