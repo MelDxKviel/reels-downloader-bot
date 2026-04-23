@@ -22,7 +22,6 @@
 - [Docker Compose](#-docker-compose)
 - [Bot Commands](#-bot-commands)
 - [Cookies (YouTube & Instagram)](#-cookies-youtube--instagram)
-- [Architecture](#-architecture)
 
 ---
 
@@ -233,43 +232,3 @@ services:
 
 > ⚠️ Cookies are tied to a browser session and may expire — re-export them if you encounter auth errors.
 
----
-
-## 🏗️ Architecture
-
-```
-Telegram Update
-      │
-      ▼
-DatabaseMiddleware          ← injects DatabaseService into handlers
-      │
-      ▼
-UserAccessMiddleware        ← checks whitelist, drops unauthorized users
-      │
-      ▼
-Router (priority order):
-  admin_router              ← /adduser, /removeuser, /stats ...
-  common_router             ← /start, /help, /id, /cache ...
-  download_cmd_router       ← /download (FSM)
-  round_router              ← /round (FSM + FFmpeg)
-  download_router           ← auto-detect URLs in messages
-  inline_router             ← inline_query + chosen_inline_result
-      │
-      ▼
-VideoDownloader.download()  ← checks cache → yt-dlp in thread executor
-      │
-      ▼
-Telegram (send file)        ← DatabaseService.record_download()
-```
-
-**Tech stack:**
-
-| Component | Technology |
-|---|---|
-| Bot framework | [aiogram 3.x](https://docs.aiogram.dev/) (async) |
-| Video downloader | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (sync, via executor) |
-| Database | PostgreSQL 17 + SQLAlchemy async ORM |
-| Migrations | Alembic |
-| Containerization | Docker Compose |
-| Dependency management | [uv](https://docs.astral.sh/uv/) |
-| Linter | [ruff](https://docs.astral.sh/ruff/) |
