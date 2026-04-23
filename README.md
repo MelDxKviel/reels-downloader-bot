@@ -1,7 +1,7 @@
 # 🎬 Reels Downloader Bot
 
-> Telegram-бот для скачивания видео с YouTube, Instagram Reels, TikTok и X (Twitter).  
-> Построен на **aiogram 3.x** + **yt-dlp**, с PostgreSQL-статистикой и системой управления доступом.
+> A Telegram bot for downloading videos from YouTube, Instagram Reels, TikTok, and X (Twitter).  
+> Built with **aiogram 3.x** + **yt-dlp**, PostgreSQL statistics, and an access control system.
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)
@@ -9,221 +9,213 @@
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-336791?logo=postgresql&logoColor=white)
 
----
-
-## 📋 Содержание
-
-- [Возможности](#-возможности)
-- [Быстрый старт](#-быстрый-старт)
-- [Конфигурация](#-конфигурация)
-- [Запуск локально](#-запуск-локально-через-uv)
-- [Запуск через Docker](#-запуск-через-docker-compose)
-- [Команды бота](#-команды-бота)
-- [Cookies (YouTube и Instagram)](#-cookies-youtube-и-instagram)
-- [Архитектура](#-архитектура)
+[🇷🇺 Русская версия](./README_RU.md)
 
 ---
 
-## ✨ Возможности
+## 📋 Table of Contents
 
-| Функция | Описание |
+- [Features](#-features)
+- [Quick Start](#-quick-start)
+- [Configuration](#-configuration)
+- [Local Setup](#-local-setup-via-uv)
+- [Docker Compose](#-docker-compose)
+- [Bot Commands](#-bot-commands)
+- [Cookies (YouTube & Instagram)](#-cookies-youtube--instagram)
+- [Architecture](#-architecture)
+
+---
+
+## ✨ Features
+
+| Feature | Description |
 |---|---|
-| 📥 **Мультиплатформенность** | YouTube, Instagram Reels, TikTok, X (Twitter) |
-| ⚡ **Кэш скачиваний** | Повторные ссылки отдаются мгновенно из локального кэша |
-| 🔐 **Контроль доступа** | Whitelist-система: только добавленные пользователи могут использовать бота |
-| 🪄 **Inline-режим** | Отправка видео прямо из любого чата: `@имя_бота <ссылка>` |
-| 🎥 **Видео-кружки** | Команда `/round` — конвертация видео в формат Telegram video note |
-| 📊 **Статистика** | Сбор статистики по платформам и пользователям в PostgreSQL |
-| 🐳 **Docker Compose** | Бот + PostgreSQL поднимаются одной командой |
-| 🍪 **Cookies** | YouTube (видео 18+) и Instagram (закрытые аккаунты) — через Netscape cookies |
+| 📥 **Multi-platform** | YouTube, Instagram Reels, TikTok, X (Twitter) |
+| ⚡ **Download cache** | Repeated links are served instantly from local cache |
+| 🔐 **Access control** | Whitelist system: only added users can use the bot |
+| 🪄 **Inline mode** | Send videos from any chat: `@bot_name <url>` |
+| 🎥 **Video notes** | `/round` command — converts video to Telegram video note format |
+| 📊 **Statistics** | Per-platform and per-user download stats stored in PostgreSQL |
+| 🐳 **Docker Compose** | Bot + PostgreSQL launched with a single command |
+| 🍪 **Cookies** | YouTube (age-restricted) and Instagram (private accounts) — via Netscape cookies |
 
 ---
 
-## 🚀 Быстрый старт
+## 🚀 Quick Start
 
 ```bash
-# 1. Клонируйте репозиторий
+# 1. Clone the repository
 git clone https://github.com/meldxkviel/reels-downloader-bot.git
 cd reels-downloader-bot
 
-# 2. Создайте .env файл
-cp .env.example .env  # или создайте вручную (см. раздел Конфигурация)
+# 2. Create .env file
+cp .env.example .env  # or create manually (see Configuration section)
 
-# 3. Запустите через Docker Compose
+# 3. Launch via Docker Compose
 docker compose up -d
 
-# 4. Проверьте логи
+# 4. Check logs
 docker compose logs -f bot
 ```
 
 ---
 
-## ⚙️ Конфигурация
+## ⚙️ Configuration
 
-Создайте файл `.env` в корне проекта:
+Create a `.env` file in the project root:
 
 ```env
-# Обязательные
+# Required
 BOT_TOKEN=your_bot_token_from_botfather
-ADMIN_USERS=123456789,987654321   # Telegram user_id через запятую
+ADMIN_USERS=123456789,987654321   # Comma-separated Telegram user IDs
 
-# База данных
+# Database
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/downloader_bot
-POSTGRES_PASSWORD=postgres        # Только для Docker Compose
+POSTGRES_PASSWORD=postgres        # Docker Compose only
 
-# Опциональные
-DOWNLOAD_DIR=downloads                   # Директория для загруженных файлов
-YT_COOKIES_FILE=./cookies/youtube.txt    # Cookies для YouTube 18+
-INSTA_COOKIES_FILE=./cookies/instagram.txt  # Cookies для Instagram (закрытые аккаунты)
-VIDEO_STORAGE_CHAT_ID=-1001234567890     # Чат для inline-pre-upload видео (fallback: первый ADMIN_USERS)
+# Optional
+DOWNLOAD_DIR=downloads                   # Directory for downloaded files
+YT_COOKIES_FILE=./cookies/youtube.txt    # Cookies for age-restricted YouTube
+INSTA_COOKIES_FILE=./cookies/instagram.txt  # Cookies for Instagram (private accounts)
+VIDEO_STORAGE_CHAT_ID=-1001234567890     # Chat for inline pre-upload (fallback: first ADMIN_USERS)
 
-# Только для Docker Compose
-YT_COOKIES_FILE_HOST_PATH=./cookies/youtube.txt     # Путь к YouTube cookies на хосте
-INSTA_COOKIES_FILE_HOST_PATH=./cookies/instagram.txt  # Путь к Instagram cookies на хосте
+# Docker Compose only
+YT_COOKIES_FILE_HOST_PATH=./cookies/youtube.txt     # Host path to YouTube cookies
+INSTA_COOKIES_FILE_HOST_PATH=./cookies/instagram.txt  # Host path to Instagram cookies
 ```
 
-### Описание переменных
+### Environment Variables
 
-| Переменная | Обязательна | Описание |
+| Variable | Required | Description |
 |---|:---:|---|
-| `BOT_TOKEN` | ✅ | Токен бота из [@BotFather](https://t.me/BotFather) |
-| `ADMIN_USERS` | ✅ | Telegram user_id администраторов (через запятую) |
-| `DATABASE_URL` | ✅ | Строка подключения к PostgreSQL (async SQLAlchemy) |
-| `POSTGRES_PASSWORD` | Docker | Пароль PostgreSQL для Docker Compose |
-| `DOWNLOAD_DIR` | ❌ | Директория для файлов (по умолчанию `downloads`) |
-| `YT_COOKIES_FILE` | ❌ | Путь к Netscape cookies-файлу для YouTube |
-| `INSTA_COOKIES_FILE` | ❌ | Путь к Netscape cookies-файлу для Instagram |
-| `VIDEO_STORAGE_CHAT_ID` | ❌ | Чат для промежуточной выгрузки видео в inline-режиме ради получения `file_id`. Если не задан — используется первый ID из `ADMIN_USERS` |
-| `YT_COOKIES_FILE_HOST_PATH` | Docker | Путь к YouTube cookies на хосте (монтируется в контейнер) |
-| `INSTA_COOKIES_FILE_HOST_PATH` | Docker | Путь к Instagram cookies на хосте (монтируется в контейнер) |
+| `BOT_TOKEN` | ✅ | Bot token from [@BotFather](https://t.me/BotFather) |
+| `ADMIN_USERS` | ✅ | Telegram user IDs of admins (comma-separated) |
+| `DATABASE_URL` | ✅ | PostgreSQL connection string (async SQLAlchemy) |
+| `POSTGRES_PASSWORD` | Docker | PostgreSQL password for Docker Compose |
+| `DOWNLOAD_DIR` | ❌ | File storage directory (default: `downloads`) |
+| `YT_COOKIES_FILE` | ❌ | Path to Netscape cookies file for YouTube |
+| `INSTA_COOKIES_FILE` | ❌ | Path to Netscape cookies file for Instagram |
+| `VIDEO_STORAGE_CHAT_ID` | ❌ | Chat for temporary video upload in inline mode to obtain `file_id`. If not set, falls back to the first admin in `ADMIN_USERS` |
+| `YT_COOKIES_FILE_HOST_PATH` | Docker | Host path to YouTube cookies (mounted into container) |
+| `INSTA_COOKIES_FILE_HOST_PATH` | Docker | Host path to Instagram cookies (mounted into container) |
 
-> ⚠️ Если `ADMIN_USERS` пустой — все команды администратора будут недоступны.  
-> ⚠️ Обычные пользователи должны быть добавлены администратором через `/adduser`.
+> ⚠️ If `ADMIN_USERS` is empty, all admin commands will be unavailable.  
+> ⚠️ Regular users must be added by an admin via `/adduser`.
 
 ---
 
-## 💻 Запуск локально (через uv)
+## 💻 Local Setup (via uv)
 
 ```bash
-# 1. Установите uv (менеджер пакетов)
+# 1. Install uv (package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Установите зависимости
+# 2. Install dependencies
 uv sync
 
-# 3. Примените миграции базы данных
+# 3. Apply database migrations
 uv run alembic upgrade head
 
-# 4. Запустите бота
+# 4. Start the bot
 uv run python -m src.main
 ```
 
-> 💡 Для работы с некоторыми форматами требуется **FFmpeg**. Без него часть видео может не скачиваться (особенно когда нужна склейка аудио + видео).  
-> Установка: `sudo apt install ffmpeg` (Linux) или `brew install ffmpeg` (macOS).
+> 💡 Some video formats require **FFmpeg**. Without it, some downloads may fail (especially when audio and video streams need to be merged).  
+> Install: `sudo apt install ffmpeg` (Linux) or `brew install ffmpeg` (macOS).
 
 ---
 
-## 🐳 Запуск через Docker Compose
+## 🐳 Docker Compose
 
 ```bash
-# Запуск бота и базы данных
+# Start the bot and database
 docker compose up -d
 
-# Просмотр логов в реальном времени
+# Stream logs
 docker compose logs -f bot
 
-# Остановка
+# Stop
 docker compose down
 ```
 
-**Что происходит под капотом:**
-- `bot` — контейнер с ботом (образ из GitHub Container Registry)
-- `db` — PostgreSQL 17 Alpine с health check
-- Данные БД сохраняются в volume `postgres_data`
-- Скачанные файлы монтируются в `./downloads/`
+**Under the hood:**
+- `bot` — bot container (image from GitHub Container Registry)
+- `db` — PostgreSQL 17 Alpine with health check
+- Database data is stored in the `postgres_data` volume
+- Downloaded files are mounted at `./downloads/`
 
 ---
 
-## 📱 Команды бота
+## 📱 Bot Commands
 
-### Пользовательские команды
+### User Commands
 
-| Команда | Описание |
+| Command | Description |
 |---|---|
-| `/start` | Приветствие и краткая инструкция |
-| `/help` | Справка по командам |
-| `/id` | Показать ваш Telegram user_id |
-| `/download [url]` | Скачать видео по ссылке (с FSM-ожиданием или сразу) |
-| `/round [url]` | Скачать видео и отправить как кружок (video note) |
-| `/cache` | Информация о локальном кэше |
-| `/clearcache` | Очистить локальный кэш |
+| `/start` | Welcome message and brief instructions |
+| `/help` | Command reference |
+| `/id` | Show your Telegram user ID |
+| `/download [url]` | Download video by URL (immediate or FSM waiting state) |
+| `/round [url]` | Download video and send as a video note (circle) |
+| `/cache` | Show local cache info |
+| `/clearcache` | Clear the local cache |
 
-> 💡 Также можно просто отправить ссылку в чат — бот скачает её автоматически.
+> 💡 You can also just send a URL in the chat — the bot will download it automatically.
 
-### Inline-режим
+### Inline Mode
 
-В любом чате (в том числе где бота нет) наберите:
+In any chat (even where the bot isn't a member), type:
 
 ```
-@имя_бота https://www.youtube.com/shorts/XXXXXXXXXXX
+@bot_name https://www.youtube.com/shorts/XXXXXXXXXXX
 ```
 
-Telegram покажет карточку — выберите её, и ролик отправится прямо в текущий
-чат от имени вызвавшего пользователя. Видео, которое уже есть в кэше
-(ранее скачивалось этим ботом), уходит моментально. Новые ссылки сначала
-показываются плашкой «⏳ Загружаю…», которая подменяется на видео после
-скачивания.
+Telegram will show a result card — select it and the video will be sent to the current chat under your name. Videos already in the cache are delivered instantly. New URLs first show a "⏳ Loading…" placeholder that is replaced with the video once downloaded.
 
-> ⚙️ Для работы второго сценария нужно:
-> - включить inline-режим у бота в BotFather (`/setinline`),
-> - включить inline feedback (`/setinlinefeedback → 100%`),
-> - задать `VIDEO_STORAGE_CHAT_ID` (любой чат/канал, где бот имеет право
->   отправлять и удалять сообщения). Telegram не позволяет загружать новые
->   файлы напрямую в inline-сообщения — бот сперва публикует видео в storage-чат,
->   получает оттуда `file_id`, подставляет его в inline-карточку и удаляет
->   промежуточное сообщение. Если `VIDEO_STORAGE_CHAT_ID` не задан, fallback —
->   личка первого администратора (`ADMIN_USERS[0]`).
+> ⚙️ For the deferred scenario to work:
+> - Enable inline mode in BotFather (`/setinline`)
+> - Enable inline feedback (`/setinlinefeedback → 100%`)
+> - Set `VIDEO_STORAGE_CHAT_ID` (any chat/channel where the bot can send and delete messages). Telegram doesn't allow uploading new files directly into inline messages — the bot first publishes the video to the storage chat, retrieves the `file_id`, inserts it into the inline card, and deletes the intermediate message. If `VIDEO_STORAGE_CHAT_ID` is not set, the fallback is the first admin's DM (`ADMIN_USERS[0]`).
 >
-> Whitelist действует и для inline-запросов: пользователи не из списка получат
-> пустой ответ.
+> The whitelist also applies to inline queries: users not on the list will receive an empty response.
 
-### Команды администратора
+### Admin Commands
 
-> Доступны только пользователям из `ADMIN_USERS`. Полная справка: `/adminhelp`.
+> Available only to users in `ADMIN_USERS`. Full reference: `/adminhelp`.
 
-| Команда | Описание |
+| Command | Description |
 |---|---|
-| `/adduser USER_ID` | Добавить пользователя (разрешить доступ) |
-| `/removeuser USER_ID` | Удалить пользователя (запретить доступ) |
-| `/users` | Список всех разрешённых пользователей |
-| `/stats` | Общая статистика бота по платформам |
-| `/userstats USER_ID` | Статистика по конкретному пользователю |
-| `/adminhelp` | Справка по всем админ-командам |
+| `/adduser USER_ID` | Add a user (grant access) |
+| `/removeuser USER_ID` | Remove a user (revoke access) |
+| `/users` | List all allowed users |
+| `/stats` | Overall bot statistics by platform |
+| `/userstats USER_ID` | Statistics for a specific user |
+| `/adminhelp` | Admin command reference |
 
 ---
 
-## 🍪 Cookies (YouTube и Instagram)
+## 🍪 Cookies (YouTube & Instagram)
 
-Cookies нужны для:
-- **YouTube** — видео 18+, приватные видео, материалы для участников канала
-- **Instagram** — закрытые аккаунты, обход ошибок `login_required`
+Cookies are needed for:
+- **YouTube** — age-restricted videos, private videos, members-only content
+- **Instagram** — private accounts, bypassing `login_required` errors
 
-Подробный пошаговый гайд (экспорт из Chrome/Firefox, Docker, устранение проблем):
+For a detailed step-by-step guide (exporting from Chrome/Firefox, Docker setup, troubleshooting):
 
 **[→ COOKIES_GUIDE.md](./COOKIES_GUIDE.md)**
 
-**Быстрая настройка:**
+**Quick setup:**
 
 ```bash
 mkdir -p cookies
-# скопируйте экспортированные файлы
+# copy exported files
 cp ~/Downloads/youtube.com_cookies.txt cookies/youtube.txt
 cp ~/Downloads/instagram.com_cookies.txt cookies/instagram.txt
 echo "cookies/" >> .gitignore
 ```
 
 ```env
-# .env (локальный запуск)
+# .env (local run)
 YT_COOKIES_FILE=./cookies/youtube.txt
 INSTA_COOKIES_FILE=./cookies/instagram.txt
 ```
@@ -239,45 +231,45 @@ services:
       - ./cookies:/app/cookies:ro
 ```
 
-> ⚠️ Cookies привязаны к сеансу браузера и могут истекать — при ошибках авторизации повторите экспорт.
+> ⚠️ Cookies are tied to a browser session and may expire — re-export them if you encounter auth errors.
 
 ---
 
-## 🏗️ Архитектура
+## 🏗️ Architecture
 
 ```
 Telegram Update
       │
       ▼
-DatabaseMiddleware          ← инжектит DatabaseService в хендлеры
+DatabaseMiddleware          ← injects DatabaseService into handlers
       │
       ▼
-UserAccessMiddleware        ← проверяет whitelist, дропает неразрешённых
+UserAccessMiddleware        ← checks whitelist, drops unauthorized users
       │
       ▼
-Router (приоритет):
+Router (priority order):
   admin_router              ← /adduser, /removeuser, /stats ...
   common_router             ← /start, /help, /id, /cache ...
   download_cmd_router       ← /download (FSM)
   round_router              ← /round (FSM + FFmpeg)
-  download_router           ← авто-детект URL в сообщениях
+  download_router           ← auto-detect URLs in messages
   inline_router             ← inline_query + chosen_inline_result
       │
       ▼
-VideoDownloader.download()  ← проверяет кэш → yt-dlp в thread executor
+VideoDownloader.download()  ← checks cache → yt-dlp in thread executor
       │
       ▼
-Telegram (отправка файла)   ← DatabaseService.record_download()
+Telegram (send file)        ← DatabaseService.record_download()
 ```
 
-**Стек технологий:**
+**Tech stack:**
 
-| Компонент | Технология |
+| Component | Technology |
 |---|---|
 | Bot framework | [aiogram 3.x](https://docs.aiogram.dev/) (async) |
-| Загрузчик видео | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (sync, через executor) |
-| База данных | PostgreSQL 17 + SQLAlchemy async ORM |
-| Миграции | Alembic |
-| Контейнеризация | Docker Compose |
-| Управление зависимостями | [uv](https://docs.astral.sh/uv/) |
-| Линтер | [ruff](https://docs.astral.sh/ruff/) |
+| Video downloader | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (sync, via executor) |
+| Database | PostgreSQL 17 + SQLAlchemy async ORM |
+| Migrations | Alembic |
+| Containerization | Docker Compose |
+| Dependency management | [uv](https://docs.astral.sh/uv/) |
+| Linter | [ruff](https://docs.astral.sh/ruff/) |
