@@ -10,6 +10,7 @@ from .gif import router as gif_router
 from .inline import router as inline_router
 from .mp3 import router as mp3_router
 from .round import router as round_router
+from .voice import router as voice_router
 
 
 def get_main_router() -> Router:
@@ -20,7 +21,8 @@ def get_main_router() -> Router:
     main_router.include_router(admin_router)  # Админ-команды первые
     main_router.include_router(common_router)  # Общие команды
     main_router.include_router(download_cmd_router)  # /download — до FSM-обработчиков gif/round/mp3
-    main_router.include_router(mp3_router)  # /mp3 — до FSM-обработчиков gif/round
+    main_router.include_router(mp3_router)  # /mp3 — до FSM-обработчиков gif/round/voice
+    main_router.include_router(voice_router)  # /voice — до FSM-обработчиков gif/round
     main_router.include_router(gif_router)  # /gif — до FSM-обработчиков round
     main_router.include_router(round_router)  # /round — до общего обработчика URL
     main_router.include_router(download_router)  # Обработка URL последняя
