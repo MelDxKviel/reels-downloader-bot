@@ -155,6 +155,9 @@ docker compose down
 | `/help` | Command reference |
 | `/id` | Show your Telegram user ID |
 | `/download [url]` | Download video by URL (immediate or FSM waiting state) |
+| `/mp3 [url]` | Download audio and send as an MP3 file |
+| `/voice [url]` | Download audio and send as a Telegram voice message |
+| `/gif [url]` | Download video and convert to a GIF |
 | `/round [url]` | Download video and send as a video note (circle) |
 | `/cache` | Show local cache info |
 | `/clearcache` | Clear the local cache |
