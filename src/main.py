@@ -86,12 +86,19 @@ async def main() -> None:
         BotCommand(command="adminhelp", description="Справка для администратора"),
     ]
 
-    await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
-    for admin_id in ADMIN_USERS:
-        try:
-            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
-        except Exception:
-            pass
+    try:
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
+        for admin_id in ADMIN_USERS:
+            try:
+                await bot.set_my_commands(
+                    admin_commands, scope=BotCommandScopeChat(chat_id=admin_id)
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Не удалось установить команды для администратора {admin_id}: {e}"
+                )
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось зарегистрировать команды бота: {e}")
 
     # Запускаем бота
     logger.info("🚀 Бот запущен!")
