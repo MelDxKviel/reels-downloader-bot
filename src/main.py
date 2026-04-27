@@ -9,6 +9,7 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat
 
 from src.bot.handlers import get_main_router
 from src.bot.middlewares import DatabaseMiddleware, UserAccessMiddleware
@@ -64,6 +65,40 @@ async def main() -> None:
 
     # Подключаем роутер
     dp.include_router(main_router)
+
+    # Регистрируем команды в меню бота
+    user_commands = [
+        BotCommand(command="start", description="Запустить бота"),
+        BotCommand(command="help", description="Справка по использованию"),
+        BotCommand(command="download", description="Скачать видео по URL"),
+        BotCommand(command="mp3", description="Извлечь аудио в MP3"),
+        BotCommand(command="voice", description="Конвертировать в голосовое сообщение"),
+        BotCommand(command="round", description="Конвертировать в кружок (видео-заметка)"),
+        BotCommand(command="gif", description="Конвертировать в GIF"),
+        BotCommand(command="id", description="Показать ваш Telegram ID"),
+    ]
+    admin_commands = user_commands + [
+        BotCommand(command="adduser", description="Добавить пользователя"),
+        BotCommand(command="removeuser", description="Удалить пользователя"),
+        BotCommand(command="users", description="Список пользователей"),
+        BotCommand(command="stats", description="Глобальная статистика"),
+        BotCommand(command="userstats", description="Статистика пользователя"),
+        BotCommand(command="adminhelp", description="Справка для администратора"),
+    ]
+
+    try:
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
+        for admin_id in ADMIN_USERS:
+            try:
+                await bot.set_my_commands(
+                    admin_commands, scope=BotCommandScopeChat(chat_id=admin_id)
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Не удалось установить команды для администратора {admin_id}: {e}"
+                )
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось зарегистрировать команды бота: {e}")
 
     # Запускаем бота
     logger.info("🚀 Бот запущен!")
