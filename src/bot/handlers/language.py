@@ -61,9 +61,7 @@ async def cmd_language(message: Message, t: Translator) -> None:
 
 
 @router.callback_query(F.data.startswith("set_lang:"))
-async def set_language_callback(
-    callback: CallbackQuery, db: DatabaseService, bot: Bot
-) -> None:
+async def set_language_callback(callback: CallbackQuery, db: DatabaseService, bot: Bot) -> None:
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
         await callback.answer()
