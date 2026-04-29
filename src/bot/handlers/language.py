@@ -5,20 +5,43 @@
 нажимает кнопку, и предпочтение сохраняется в БД (через ``UserPreference``).
 В ``callback_data`` зашит ``user_id`` инициатора, чтобы в групповых чатах
 кнопку не мог нажать посторонний.
+
+Если пользователь является администратором, после смены языка сразу обновляется
+меню команд для его чата (``BotCommandScopeChat``), чтобы описания команд
+переключились без перезапуска бота.
 """
 
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommandScopeChat,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
+from src.bot.commands import admin_commands
+from src.config import ADMIN_USERS
 from src.services.database import DatabaseService
 from src.services.i18n import Translator, supported_languages_with_labels
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+async def _refresh_admin_commands(bot: Bot, admin_id: int, lang: str) -> None:
+    """Re-register the per-chat admin command scope in the new language."""
+    try:
+        await bot.set_my_commands(
+            admin_commands(Translator(lang)),
+            scope=BotCommandScopeChat(chat_id=admin_id),
+        )
+    except Exception as e:
+        logger.debug("Could not refresh admin commands for %s: %s", admin_id, e)
 
 
 def _language_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -38,7 +61,9 @@ async def cmd_language(message: Message, t: Translator) -> None:
 
 
 @router.callback_query(F.data.startswith("set_lang:"))
-async def set_language_callback(callback: CallbackQuery, db: DatabaseService) -> None:
+async def set_language_callback(
+    callback: CallbackQuery, db: DatabaseService, bot: Bot
+) -> None:
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
         await callback.answer()
@@ -77,3 +102,7 @@ async def set_language_callback(callback: CallbackQuery, db: DatabaseService) ->
     except Exception as e:
         logger.debug("Не удалось отредактировать сообщение выбора языка: %s", e)
     await callback.answer()
+
+    # Если это администратор — сразу обновляем его меню команд.
+    if owner_id in ADMIN_USERS:
+        await _refresh_admin_commands(bot, owner_id, code)
