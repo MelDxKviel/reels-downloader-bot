@@ -48,6 +48,7 @@ from aiogram.types import (
 from src.config import ADMIN_USERS, VIDEO_STORAGE_CHAT_ID
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
+from src.services.i18n import Translator, translate_download_error
 from src.services.url_utils import extract_url, get_url_hash
 
 from .mp3 import _convert_to_mp3
@@ -56,22 +57,13 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-LOADING_KEYBOARD = InlineKeyboardMarkup(
-    inline_keyboard=[[InlineKeyboardButton(text="⏳ Загружается…", callback_data="inline_loading")]]
-)
 
-HINT_TITLE = "Введите ссылку на видео"
-HINT_DESCRIPTION = "YouTube · Instagram · TikTok · X/Twitter"
-HINT_MESSAGE = (
-    "📎 Чтобы скачать видео через inline-режим, отправьте ссылку "
-    "с поддерживаемой платформы (YouTube, Instagram, TikTok, X/Twitter)."
-)
-
-INVALID_TITLE = "❌ Ссылка не распознана"
-INVALID_DESCRIPTION = "Поддерживаются: YouTube, Instagram, TikTok, X/Twitter"
-INVALID_MESSAGE = (
-    "❌ Не удалось распознать ссылку.\nПоддерживаются: YouTube, Instagram, TikTok, X/Twitter."
-)
+def _loading_keyboard(t: Translator) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("inline.loading_button"), callback_data="inline_loading")]
+        ]
+    )
 
 
 def _extract_url(text: Optional[str]) -> Optional[str]:
@@ -79,7 +71,7 @@ def _extract_url(text: Optional[str]) -> Optional[str]:
 
 
 @router.inline_query()
-async def inline_query_handler(query: InlineQuery) -> None:
+async def inline_query_handler(query: InlineQuery, t: Translator) -> None:
     """Формирует inline-результаты по введённому тексту (видео, кружок, MP3)."""
     text = (query.query or "").strip()
 
@@ -88,9 +80,11 @@ async def inline_query_handler(query: InlineQuery) -> None:
             results=[
                 InlineQueryResultArticle(
                     id="hint",
-                    title=HINT_TITLE,
-                    description=HINT_DESCRIPTION,
-                    input_message_content=InputTextMessageContent(message_text=HINT_MESSAGE),
+                    title=t("inline.hint_title"),
+                    description=t("inline.hint_description"),
+                    input_message_content=InputTextMessageContent(
+                        message_text=t("inline.hint_message")
+                    ),
                 )
             ],
             cache_time=1,
@@ -104,9 +98,11 @@ async def inline_query_handler(query: InlineQuery) -> None:
             results=[
                 InlineQueryResultArticle(
                     id="invalid",
-                    title=INVALID_TITLE,
-                    description=INVALID_DESCRIPTION,
-                    input_message_content=InputTextMessageContent(message_text=INVALID_MESSAGE),
+                    title=t("inline.invalid_title"),
+                    description=t("inline.invalid_description"),
+                    input_message_content=InputTextMessageContent(
+                        message_text=t("inline.invalid_message")
+                    ),
                 )
             ],
             cache_time=1,
@@ -131,8 +127,8 @@ async def inline_query_handler(query: InlineQuery) -> None:
             InlineQueryResultCachedPhoto(
                 id=f"cached_photo:{result_id}",
                 photo_file_id=cached_photo_id,
-                title=f"🖼 Скачать с {platform}",
-                description="Отправить моментально (из кэша)",
+                title=t("inline.cached_photo_title", platform=platform),
+                description=t("inline.cached_description"),
             )
         )
     elif cached_video_id:
@@ -140,21 +136,21 @@ async def inline_query_handler(query: InlineQuery) -> None:
             InlineQueryResultCachedVideo(
                 id=f"cached:{result_id}",
                 video_file_id=cached_video_id,
-                title=f"🎬 Скачать с {platform}",
-                description="Отправить моментально (из кэша)",
+                title=t("inline.cached_video_title", platform=platform),
+                description=t("inline.cached_description"),
             )
         )
     else:
         results.append(
             InlineQueryResultArticle(
                 id=f"download:{result_id}",
-                title=f"📥 Скачать с {platform}",
+                title=t("inline.download_title", platform=platform),
                 description=url[:128],
                 input_message_content=InputTextMessageContent(
-                    message_text=f"⏳ Загружаю с <b>{platform}</b>...",
+                    message_text=t("inline.download_status", platform=platform),
                     parse_mode="HTML",
                 ),
-                reply_markup=LOADING_KEYBOARD,
+                reply_markup=_loading_keyboard(t),
             )
         )
 
@@ -165,20 +161,20 @@ async def inline_query_handler(query: InlineQuery) -> None:
             InlineQueryResultCachedAudio(
                 id=f"cached_mp3:{result_id}",
                 audio_file_id=cached_mp3_id,
-                title=f"🎵 MP3 с {platform}",
+                title=t("inline.mp3_title", platform=platform),
             )
         )
     else:
         results.append(
             InlineQueryResultArticle(
                 id=f"mp3:{result_id}",
-                title=f"🎵 MP3 с {platform}",
-                description="Извлечь аудио в формате MP3",
+                title=t("inline.mp3_title", platform=platform),
+                description=t("inline.mp3_description"),
                 input_message_content=InputTextMessageContent(
-                    message_text=f"⏳ Извлекаю MP3 с <b>{platform}</b>...",
+                    message_text=t("inline.mp3_status", platform=platform),
                     parse_mode="HTML",
                 ),
-                reply_markup=LOADING_KEYBOARD,
+                reply_markup=_loading_keyboard(t),
             )
         )
 
@@ -186,13 +182,15 @@ async def inline_query_handler(query: InlineQuery) -> None:
 
 
 @router.callback_query(F.data == "inline_loading")
-async def inline_loading_callback(callback: CallbackQuery) -> None:
+async def inline_loading_callback(callback: CallbackQuery, t: Translator) -> None:
     """Тык по placeholder-кнопке во время загрузки."""
-    await callback.answer("⏳ Видео загружается, подождите…")
+    await callback.answer(t("inline.loading_callback"))
 
 
 @router.chosen_inline_result()
-async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: DatabaseService) -> None:
+async def chosen_inline_handler(
+    chosen: ChosenInlineResult, bot: Bot, db: DatabaseService, t: Translator
+) -> None:
     """Докачивает медиа и заменяет текстовую заглушку на видео, кружок или MP3."""
     result_id = chosen.result_id or ""
 
@@ -228,7 +226,7 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
 
     url = _extract_url(chosen.query)
     if url is None:
-        await _safe_edit_text(bot, inline_message_id, INVALID_MESSAGE)
+        await _safe_edit_text(bot, inline_message_id, t("inline.invalid_message"))
         return
 
     platform = downloader.get_platform_name(url)
@@ -239,19 +237,13 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
         result = await downloader.download(url)
     except Exception as e:
         logger.error("Ошибка скачивания (inline): %s", e, exc_info=True)
-        await _safe_edit_text(
-            bot, inline_message_id, "❌ <b>Произошла ошибка</b>\n\nПопробуйте позже."
-        )
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.generic"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
     if not result.success or not result.file_path:
-        reason = html.escape(result.error or "неизвестная ошибка")
-        await _safe_edit_text(
-            bot,
-            inline_message_id,
-            f"❌ <b>Не удалось скачать</b>\n\nПричина: {reason}",
-        )
+        reason = html.escape(translate_download_error(t, result))
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed", reason=reason))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -260,16 +252,24 @@ async def chosen_inline_handler(chosen: ChosenInlineResult, bot: Bot, db: Databa
             # В inline Telegram не умеет редактировать сообщение в media group,
             # поэтому для карусели отправляется только первый слайд.
             await _handle_photo(
-                bot, db, inline_message_id, url, platform, user_id, result.file_path
+                bot, db, inline_message_id, url, platform, user_id, result.file_path, t
             )
         else:
             await _handle_video(
-                bot, db, inline_message_id, url, platform, user_id, result.file_path
+                bot, db, inline_message_id, url, platform, user_id, result.file_path, t
             )
 
     elif operation == "mp3":
         await _handle_mp3(
-            bot, db, inline_message_id, url, platform, user_id, result.file_path, result.title
+            bot,
+            db,
+            inline_message_id,
+            url,
+            platform,
+            user_id,
+            result.file_path,
+            result.title,
+            t,
         )
 
 
@@ -281,17 +281,12 @@ async def _handle_video(
     platform: str,
     user_id: int,
     file_path: str,
+    t: Translator,
 ) -> None:
     """Загружает видео в storage и подменяет inline-заглушку."""
     file_id = await _upload_video_and_get_file_id(bot, file_path)
     if not file_id:
-        await _safe_edit_text(
-            bot,
-            inline_message_id,
-            "❌ <b>Не удалось опубликовать</b>\n\n"
-            "Inline-storage не настроен или файл не загрузился. "
-            "Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",
-        )
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.publish_video"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -305,9 +300,7 @@ async def _handle_video(
         )
     except Exception as e:
         logger.error("Ошибка при editMessageMedia (видео, inline): %s", e, exc_info=True)
-        await _safe_edit_text(
-            bot, inline_message_id, "❌ <b>Не удалось отправить</b>\n\nПопробуйте позже."
-        )
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.send"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -322,17 +315,12 @@ async def _handle_photo(
     platform: str,
     user_id: int,
     file_path: str,
+    t: Translator,
 ) -> None:
     """Загружает фото в storage и подменяет inline-заглушку."""
     file_id = await _upload_photo_and_get_file_id(bot, file_path)
     if not file_id:
-        await _safe_edit_text(
-            bot,
-            inline_message_id,
-            "❌ <b>Не удалось опубликовать</b>\n\n"
-            "Inline-storage не настроен или файл не загрузился. "
-            "Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",
-        )
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.publish_photo"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -346,9 +334,7 @@ async def _handle_photo(
         )
     except Exception as e:
         logger.error("Ошибка при editMessageMedia (фото, inline): %s", e, exc_info=True)
-        await _safe_edit_text(
-            bot, inline_message_id, "❌ <b>Не удалось отправить</b>\n\nПопробуйте позже."
-        )
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.send"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -365,6 +351,7 @@ async def _handle_mp3(
     user_id: int,
     file_path: str,
     title: Optional[str],
+    t: Translator,
 ) -> None:
     """Конвертирует в MP3, загружает в storage и подменяет inline-заглушку."""
     mp3_path: Optional[str] = None
@@ -374,11 +361,7 @@ async def _handle_mp3(
         logger.error("Ошибка конвертации в MP3 (inline): %s", e, exc_info=True)
 
     if not mp3_path:
-        await _safe_edit_text(
-            bot,
-            inline_message_id,
-            "❌ <b>Не удалось конвертировать в MP3</b>\n\nFFmpeg не найден или ошибка обработки.",
-        )
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.mp3_convert"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -391,12 +374,7 @@ async def _handle_mp3(
             pass
 
     if not file_id:
-        await _safe_edit_text(
-            bot,
-            inline_message_id,
-            "❌ <b>Не удалось опубликовать MP3</b>\n\n"
-            "Inline-storage не настроен. Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",
-        )
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.publish_mp3"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -410,9 +388,7 @@ async def _handle_mp3(
         )
     except Exception as e:
         logger.error("Ошибка при editMessageMedia (MP3, inline): %s", e, exc_info=True)
-        await _safe_edit_text(
-            bot, inline_message_id, "❌ <b>Не удалось отправить MP3</b>\n\nПопробуйте позже."
-        )
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.send_mp3"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 

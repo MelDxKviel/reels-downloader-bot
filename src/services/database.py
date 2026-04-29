@@ -10,7 +10,7 @@ from sqlalchemy import BigInteger, Boolean, DateTime, String, Text, and_, func, 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from src.config import DATABASE_URL
+from src.config import DATABASE_URL, DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,23 @@ class DownloadStats(Base):
     url: Mapped[str] = mapped_column(Text)
     success: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class UserPreference(Base):
+    """Пользовательские настройки (язык и т.п.).
+
+    Хранится отдельно от ``users``, чтобы админы (которых нет в whitelist)
+    тоже могли сохранить язык, не получая побочного эффекта в виде записи в
+    таблице доступа.
+    """
+
+    __tablename__ = "user_preferences"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    language: Mapped[str] = mapped_column(String(8), default=DEFAULT_LANGUAGE)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class DatabaseService:
@@ -133,6 +150,37 @@ class DatabaseService:
         """Проверяет, разрешен ли пользователь."""
         user = await self.get_user(user_id)
         return user is not None and user.is_active
+
+    # === Языковые предпочтения ===
+
+    async def get_user_language(self, user_id: int) -> Optional[str]:
+        """Возвращает сохранённый язык пользователя или None, если не задан."""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(UserPreference).where(UserPreference.user_id == user_id)
+            )
+            pref = result.scalar_one_or_none()
+            return pref.language if pref else None
+
+    async def set_user_language(self, user_id: int, language: str) -> bool:
+        """Сохраняет язык пользователя.
+
+        Возвращает True при успехе, False если язык не из списка поддерживаемых.
+        """
+        if language not in SUPPORTED_LANGUAGES:
+            return False
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(UserPreference).where(UserPreference.user_id == user_id)
+            )
+            pref = result.scalar_one_or_none()
+            if pref is None:
+                pref = UserPreference(user_id=user_id, language=language)
+                session.add(pref)
+            else:
+                pref.language = language
+            await session.commit()
+            return True
 
     # === Статистика ===
 

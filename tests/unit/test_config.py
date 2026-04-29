@@ -73,3 +73,51 @@ def test_video_storage_chat_id_none_when_not_set():
 
         importlib.reload(cfg)
         assert cfg.VIDEO_STORAGE_CHAT_ID is None
+
+
+def test_default_language_from_env():
+    with patch.dict(os.environ, {"DEFAULT_LANGUAGE": "en"}):
+        import importlib
+
+        import src.config as cfg
+
+        importlib.reload(cfg)
+        assert cfg.DEFAULT_LANGUAGE == "en"
+
+
+def test_default_language_normalizes_case():
+    with patch.dict(os.environ, {"DEFAULT_LANGUAGE": "EN"}):
+        import importlib
+
+        import src.config as cfg
+
+        importlib.reload(cfg)
+        assert cfg.DEFAULT_LANGUAGE == "en"
+
+
+def test_default_language_falls_back_when_unsupported():
+    with patch.dict(os.environ, {"DEFAULT_LANGUAGE": "xx"}):
+        import importlib
+
+        import src.config as cfg
+
+        importlib.reload(cfg)
+        assert cfg.DEFAULT_LANGUAGE == "ru"
+
+
+def test_default_language_default_is_ru():
+    env = {k: v for k, v in os.environ.items() if k != "DEFAULT_LANGUAGE"}
+    with patch.dict(os.environ, env, clear=True):
+        import importlib
+
+        import src.config as cfg
+
+        importlib.reload(cfg)
+        assert cfg.DEFAULT_LANGUAGE == "ru"
+
+
+def test_supported_languages_includes_ru_and_en():
+    import src.config as cfg
+
+    assert "ru" in cfg.SUPPORTED_LANGUAGES
+    assert "en" in cfg.SUPPORTED_LANGUAGES

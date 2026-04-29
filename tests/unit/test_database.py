@@ -177,3 +177,41 @@ async def test_get_global_stats_with_since_filter(db_service):
     future_since = datetime.utcnow() + timedelta(hours=1)
     stats = await db_service.get_global_stats(since=future_since)
     assert stats["total_downloads"] == 0
+
+
+# ── language preferences ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_user_language_unset_returns_none(db_service):
+    assert await db_service.get_user_language(1001) is None
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_user_language(db_service):
+    success = await db_service.set_user_language(1001, "en")
+    assert success is True
+    assert await db_service.get_user_language(1001) == "en"
+
+
+@pytest.mark.asyncio
+async def test_set_user_language_updates_existing(db_service):
+    await db_service.set_user_language(1001, "ru")
+    await db_service.set_user_language(1001, "en")
+    assert await db_service.get_user_language(1001) == "en"
+
+
+@pytest.mark.asyncio
+async def test_set_user_language_rejects_unsupported(db_service):
+    success = await db_service.set_user_language(1001, "fr")
+    assert success is False
+    assert await db_service.get_user_language(1001) is None
+
+
+@pytest.mark.asyncio
+async def test_user_language_independent_of_user_table(db_service):
+    """Saving a language must not auto-create a row in the access table."""
+    await db_service.set_user_language(1001, "en")
+    user = await db_service.get_user(1001)
+    assert user is None  # not added to whitelist
+    assert await db_service.is_user_allowed(1001) is False
