@@ -10,76 +10,43 @@ from aiogram.types import LinkPreviewOptions, Message
 
 from src.bot.handlers.admin import is_admin
 from src.services.downloader import downloader
+from src.services.i18n import Translator
 
 router = Router()
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, t: Translator) -> None:
     """Обработчик команды /start."""
     user = message.from_user
-    await message.answer(
-        f"👋 Привет, <b>{user.full_name}</b>!\n\n"
-        "🎬 Я помогу скачать видео с популярных платформ:\n"
-        "• YouTube\n"
-        "• Instagram Reels\n"
-        "• TikTok\n"
-        "• X (Twitter)\n\n"
-        "📎 Просто отправь мне ссылку на видео, и я пришлю его тебе!\n\n"
-        "⚡ <b>Inline-режим:</b> в любом чате наберите "
-        "<code>@имя_бота ссылка</code> — и видео отправится прямо из этого чата.\n\n"
-        "⚠️ <i>Ограничение: максимальный размер видео — 50 МБ</i>"
-    )
+    await message.answer(t("start.text", name=user.full_name))
 
 
 @router.message(Command("help"))
-async def cmd_help(message: Message) -> None:
+async def cmd_help(message: Message, t: Translator) -> None:
     """Обработчик команды /help."""
-    text = (
-        "📖 <b>Как пользоваться ботом:</b>\n\n"
-        "1️⃣ Скопируй ссылку на видео\n"
-        "2️⃣ Отправь её мне в чат\n"
-        "3️⃣ Подожди, пока я скачаю и отправлю видео\n\n"
-        "📱 <b>Поддерживаемые платформы:</b>\n"
-        "• <b>YouTube</b> — youtube.com, youtu.be\n"
-        "• <b>Instagram</b> — instagram.com/reel/, instagram.com/p/\n"
-        "• <b>TikTok</b> — tiktok.com, vm.tiktok.com\n"
-        "• <b>X/Twitter</b> — twitter.com, x.com\n\n"
-        "🛠 <b>Дополнительные команды:</b>\n"
-        "• /round — конвертировать видео в кружок (макс 60 сек)\n"
-        "• /gif — конвертировать видео в GIF (макс 10 сек)\n"
-        "• /mp3 — извлечь аудио из видео в формате MP3\n"
-        "• /voice — конвертировать видео/аудио/ссылку в голосовое сообщение\n\n"
-        "⚡ <b>Inline-режим:</b>\n"
-        "В любом чате введите <code>@имя_бота ссылка</code> — бот предложит карточку "
-        "для отправки видео, и ролик появится прямо в чате.\n"
-        "Уже скачанные видео отправляются моментально из кэша.\n\n"
-        "⚠️ <b>Ограничения:</b>\n"
-        "• Максимальный размер видео: 50 МБ\n"
-        "• Приватные видео не поддерживаются\n\n"
-        "💡 <b>Совет:</b> Если видео слишком большое, попробуй найти его в более низком качестве"
-    )
+    text = t("help.text")
     if is_admin(message.from_user.id):
-        text += (
-            "\n\n🔐 <b>Вы администратор.</b> Используйте /adminhelp для списка команд управления."
-        )
+        text += t("help.admin_suffix")
     await message.answer(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 @router.message(Command("id"))
-async def cmd_id(message: Message) -> None:
+async def cmd_id(message: Message, t: Translator) -> None:
     """Показывает ID пользователя."""
     user = message.from_user
     await message.answer(
-        f"👤 <b>Информация о вас:</b>\n\n"
-        f"🆔 ID: <code>{user.id}</code>\n"
-        f"📛 Имя: {user.full_name}\n"
-        f"🔗 Username: @{user.username or 'не указан'}"
+        t(
+            "id.text",
+            user_id=user.id,
+            full_name=user.full_name,
+            username=user.username or t("id.username_unset"),
+        )
     )
 
 
 @router.message(Command("cache"))
-async def cmd_cache(message: Message) -> None:
+async def cmd_cache(message: Message, t: Translator) -> None:
     """Показывает информацию о кэше."""
     cache_size = len(downloader.cache)
     total_size = 0
@@ -89,16 +56,11 @@ async def cmd_cache(message: Message) -> None:
             total_size += os.path.getsize(file_path)
 
     size_mb = total_size / (1024 * 1024)
-    await message.answer(
-        f"💾 <b>Информация о кэше:</b>\n\n"
-        f"📁 Видео в кэше: {cache_size}\n"
-        f"📊 Размер: {size_mb:.1f} МБ\n\n"
-        f"<i>Используйте /clearcache для очистки</i>"
-    )
+    await message.answer(t("cache.text", count=cache_size, size_mb=size_mb))
 
 
 @router.message(Command("clearcache"))
-async def cmd_clearcache(message: Message) -> None:
+async def cmd_clearcache(message: Message, t: Translator) -> None:
     """Очищает кэш видео."""
     count = downloader.clear_cache()
-    await message.answer(f"🗑 Кэш очищен!\nУдалено файлов: {count}")
+    await message.answer(t("cache.cleared", count=count))

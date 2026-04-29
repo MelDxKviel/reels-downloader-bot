@@ -11,6 +11,7 @@ from aiogram.types import FSInputFile, InputMediaDocument, InputMediaPhoto, Mess
 
 from src.services.database import DatabaseService
 from src.services.downloader import DownloadResult, downloader
+from src.services.i18n import Translator, translate_download_error
 from src.services.url_utils import extract_url
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ router = Router()
 
 
 @router.message(F.text)
-async def handle_url(message: Message, db: DatabaseService) -> None:
+async def handle_url(message: Message, db: DatabaseService, t: Translator) -> None:
     """Обработчик текстовых сообщений с URL."""
     text = message.text
 
@@ -32,40 +33,34 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
             domain in text.lower()
             for domain in ["youtube", "instagram", "kkinstagram", "tiktok", "twitter", "x.com"]
         ):
-            await message.answer(
-                "🤔 Похоже, вы хотели отправить ссылку, но она некорректна.\n"
-                "Пожалуйста, скопируйте полную ссылку на видео."
-            )
+            await message.answer(t("download.invalid_link_hint"))
         else:
-            await message.answer(
-                "📎 Отправьте мне ссылку на видео с YouTube, Instagram, TikTok или X/Twitter.\n"
-                "Используйте /help для получения справки."
-            )
+            await message.answer(t("download.send_link_hint"))
         return
 
     platform = downloader.get_platform_name(url)
 
     # Отправляем сообщение о начале скачивания
-    status_message = await message.answer(
-        f"⏳ Скачиваю с <b>{platform}</b>...\nЭто может занять некоторое время."
-    )
+    status_message = await message.answer(t("download.start_status", platform=platform))
 
     try:
         # Скачиваем видео или фото
         result: DownloadResult = await downloader.download(url)
 
         if not result.success:
-            reason = html.escape(result.error or "Неизвестная ошибка")
-            await status_message.edit_text(f"❌ <b>Не удалось скачать</b>\n\nПричина: {reason}")
+            reason = html.escape(translate_download_error(t, result))
+            await status_message.edit_text(t("download.failed", reason=reason))
             return
 
-        media_label = "фото" if result.is_photo else "видео"
+        media_label = (
+            t("download.media_label.photo") if result.is_photo else t("download.media_label.video")
+        )
 
         # Обновляем статус
         if result.from_cache:
-            await status_message.edit_text(f"📤 Отправляю {media_label} из кэша...")
+            await status_message.edit_text(t("download.from_cache_status", media_label=media_label))
         else:
-            await status_message.edit_text(f"📤 Отправляю {media_label}...")
+            await status_message.edit_text(t("download.send_status", media_label=media_label))
 
         if result.is_photo:
             photo_paths = result.photo_paths or [result.file_path]
@@ -111,6 +106,4 @@ async def handle_url(message: Message, db: DatabaseService) -> None:
         user = message.from_user
         await db.record_download(user_id=user.id, platform=platform, url=url, success=False)
 
-        await status_message.edit_text(
-            "❌ <b>Произошла ошибка</b>\n\nПопробуйте позже или используйте другую ссылку."
-        )
+        await status_message.edit_text(t("download.generic_error"))

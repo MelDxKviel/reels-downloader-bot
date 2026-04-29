@@ -26,6 +26,7 @@ from aiogram.types import (
 from src.config import DOWNLOAD_DIR
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
+from src.services.i18n import Translator, translate_download_error
 from src.services.url_utils import extract_url
 
 logger = logging.getLogger(__name__)
@@ -37,10 +38,14 @@ class VoiceStates(StatesGroup):
     waiting_for_input = State()
 
 
-def _cancel_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def _cancel_keyboard(user_id: int, t: Translator) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_voice:{user_id}")]
+            [
+                InlineKeyboardButton(
+                    text=t("common.cancel_button"), callback_data=f"cancel_voice:{user_id}"
+                )
+            ]
         ]
     )
 
@@ -100,16 +105,15 @@ async def _send_voice(
     file_path: str,
     platform: str,
     url: str,
+    t: Translator,
 ) -> None:
     """Конвертирует файл и отправляет как голосовое сообщение."""
-    await status_msg.edit_text("🔄 Конвертирую в голосовое сообщение...")
+    await status_msg.edit_text(t("voice.convert_status"))
 
     voice_path = await _convert_to_voice(file_path)
 
     if voice_path is None:
-        await status_msg.edit_text(
-            "❌ <b>Ошибка конвертации</b>\n\nFFmpeg не найден или произошла ошибка обработки."
-        )
+        await status_msg.edit_text(t("voice.convert_error"))
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
@@ -124,7 +128,7 @@ async def _send_voice(
         logger.info("✅ Голосовое сообщение отправлено (пользователь: %s)", message.from_user.id)
     except Exception as e:
         logger.error("Ошибка при отправке голосового сообщения: %s", e, exc_info=True)
-        await status_msg.edit_text("❌ <b>Ошибка при отправке</b>\n\nПопробуйте позже.")
+        await status_msg.edit_text(t("voice.send_error"))
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
@@ -140,34 +144,37 @@ async def _download_and_send_voice(
     db: DatabaseService,
     status_msg: Message,
     url: str,
+    t: Translator,
 ) -> None:
     """Скачивает медиа по URL и отправляет аудио как голосовое сообщение."""
     platform = downloader.get_platform_name(url)
-    await status_msg.edit_text(f"⏳ Скачиваю видео с <b>{platform}</b>...")
+    await status_msg.edit_text(t("voice.download_status", platform=platform))
 
     try:
         result = await downloader.download(url)
     except Exception as e:
         logger.error("Ошибка скачивания: %s", e, exc_info=True)
-        await status_msg.edit_text("❌ <b>Ошибка при скачивании</b>\n\nПопробуйте позже.")
+        await status_msg.edit_text(t("voice.download_error"))
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
         return
 
     if not result.success:
-        reason = html.escape(result.error or "Неизвестная ошибка")
-        await status_msg.edit_text(f"❌ <b>Не удалось скачать видео</b>\n\nПричина: {reason}")
+        reason = html.escape(translate_download_error(t, result))
+        await status_msg.edit_text(t("voice.failed", reason=reason))
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
         return
 
-    await _send_voice(message, db, status_msg, result.file_path, platform, url)
+    await _send_voice(message, db, status_msg, result.file_path, platform, url, t)
 
 
 @router.message(Command("voice"))
-async def cmd_voice(message: Message, state: FSMContext, db: DatabaseService) -> None:
+async def cmd_voice(
+    message: Message, state: FSMContext, db: DatabaseService, t: Translator
+) -> None:
     """Обработчик /voice — принимает URL в команде или переходит в режим ожидания."""
     text = message.text or ""
     parts = text.split(maxsplit=1)
@@ -177,21 +184,20 @@ async def cmd_voice(message: Message, state: FSMContext, db: DatabaseService) ->
 
     if url:
         await state.clear()
-        status_msg = await message.answer("⏳ Обрабатываю...")
-        await _download_and_send_voice(message, db, status_msg, url)
+        status_msg = await message.answer(t("common.processing"))
+        await _download_and_send_voice(message, db, status_msg, url, t)
         return
 
     prompt = await message.answer(
-        "🎤 Отправьте ссылку на видео, mp4-файл или аудиофайл (MP3 и др.).\n\n"
-        "Я извлеку аудио и пришлю его как <b>голосовое сообщение</b>.",
-        reply_markup=_cancel_keyboard(message.from_user.id),
+        t("voice.prompt"),
+        reply_markup=_cancel_keyboard(message.from_user.id, t),
     )
     await state.set_state(VoiceStates.waiting_for_input)
     await state.update_data(prompt_message_id=prompt.message_id)
 
 
 @router.callback_query(F.data.startswith("cancel_voice:"))
-async def cancel_voice(callback: CallbackQuery, state: FSMContext) -> None:
+async def cancel_voice(callback: CallbackQuery, state: FSMContext, t: Translator) -> None:
     """Отмена ожидания — только инициатор может отменить."""
     try:
         owner_id = int(callback.data.split(":", 1)[1])
@@ -199,22 +205,22 @@ async def cancel_voice(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     if callback.from_user.id != owner_id:
-        await callback.answer("Это не ваша операция.", show_alert=True)
+        await callback.answer(t("common.not_your_operation"), show_alert=True)
         return
     await state.clear()
-    await callback.message.edit_text("❌ Создание голосового сообщения отменено.")
+    await callback.message.edit_text(t("voice.cancelled"))
     await callback.answer()
 
 
 @router.message(VoiceStates.waiting_for_input, F.text)
-async def voice_got_url(message: Message, state: FSMContext, db: DatabaseService) -> None:
+async def voice_got_url(
+    message: Message, state: FSMContext, db: DatabaseService, t: Translator
+) -> None:
     """Получена ссылка в режиме ожидания."""
     url = extract_url(message.text)
 
     if not url:
-        await message.answer(
-            "🤔 Ссылка не найдена. Отправьте ссылку, файл или нажмите ❌ для отмены."
-        )
+        await message.answer(t("voice.url_not_found"))
         return
 
     data = await state.get_data()
@@ -227,31 +233,31 @@ async def voice_got_url(message: Message, state: FSMContext, db: DatabaseService
         except Exception:
             pass
 
-    status_msg = await message.answer("⏳ Обрабатываю...")
-    await _download_and_send_voice(message, db, status_msg, url)
+    status_msg = await message.answer(t("common.processing"))
+    await _download_and_send_voice(message, db, status_msg, url, t)
 
 
 @router.message(VoiceStates.waiting_for_input, F.video | F.audio | F.document)
-async def voice_got_file(message: Message, state: FSMContext, db: DatabaseService) -> None:
+async def voice_got_file(
+    message: Message, state: FSMContext, db: DatabaseService, t: Translator
+) -> None:
     """Получен видео- или аудиофайл в режиме ожидания."""
     if message.video:
         file_id = message.video.file_id
         ext = ".mp4"
-        status_text = "⏳ Загружаю видео..."
+        status_text = t("voice.upload_video_status")
     elif message.audio:
         file_id = message.audio.file_id
         ext = ".mp3"
-        status_text = "⏳ Загружаю аудио..."
+        status_text = t("voice.upload_audio_status")
     elif message.document:
         mime = message.document.mime_type or ""
         if not (mime.startswith("video/") or mime.startswith("audio/")):
-            await message.answer(
-                "⚠️ Неподдерживаемый формат. Отправьте видео, аудиофайл или ссылку на видео."
-            )
+            await message.answer(t("voice.unsupported_format"))
             return
         file_id = message.document.file_id
         ext = ".mp4" if mime.startswith("video/") else ".mp3"
-        status_text = "⏳ Загружаю файл..."
+        status_text = t("voice.upload_file_status")
     else:
         return
 
@@ -274,7 +280,7 @@ async def voice_got_file(message: Message, state: FSMContext, db: DatabaseServic
             await message.bot.download_file(tg_file.file_path, destination=upload_path)
         except Exception as e:
             logger.error("Ошибка загрузки файла из Telegram: %s", e, exc_info=True)
-            await status_msg.edit_text("❌ <b>Не удалось загрузить файл</b>")
+            await status_msg.edit_text(t("voice.upload_failed"))
             return
         await _send_voice(
             message,
@@ -283,6 +289,7 @@ async def voice_got_file(message: Message, state: FSMContext, db: DatabaseServic
             upload_path,
             "Upload",
             f"upload:{message.from_user.id}",
+            t,
         )
     finally:
         if os.path.exists(upload_path):

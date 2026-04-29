@@ -9,12 +9,17 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat
+from aiogram.types import (
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+)
 
+from src.bot.commands import admin_commands, user_commands
 from src.bot.handlers import get_main_router
-from src.bot.middlewares import DatabaseMiddleware, UserAccessMiddleware
-from src.config import ADMIN_USERS, BOT_TOKEN
+from src.bot.middlewares import DatabaseMiddleware, LocaleMiddleware, UserAccessMiddleware
+from src.config import ADMIN_USERS, BOT_TOKEN, DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES
 from src.services.database import DatabaseService
+from src.services.i18n import Translator
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,6 +28,43 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+
+
+async def _setup_bot_commands(bot: Bot, db: DatabaseService) -> None:
+    """Регистрирует меню команд для каждого поддерживаемого языка.
+
+    Telegram сам выберет нужный набор по ``language_code`` пользователя.
+    Команды по умолчанию (``language_code=None``) — на ``DEFAULT_LANGUAGE``.
+    Админам команды устанавливаются индивидуально по их сохранённому языку
+    (или ``DEFAULT_LANGUAGE``, если не выбрали).
+    """
+    try:
+        # Дефолтный набор — на DEFAULT_LANGUAGE.
+        default_t = Translator(DEFAULT_LANGUAGE)
+        await bot.set_my_commands(user_commands(default_t), scope=BotCommandScopeAllPrivateChats())
+
+        # Локализованные наборы для каждого поддерживаемого языка.
+        for code in SUPPORTED_LANGUAGES:
+            await bot.set_my_commands(
+                user_commands(Translator(code)),
+                scope=BotCommandScopeAllPrivateChats(),
+                language_code=code,
+            )
+
+        # Админам ставим расширенный набор индивидуально на их языке.
+        for admin_id in ADMIN_USERS:
+            try:
+                stored = await db.get_user_language(admin_id)
+                admin_t = Translator(stored) if stored else default_t
+                await bot.set_my_commands(
+                    admin_commands(admin_t), scope=BotCommandScopeChat(chat_id=admin_id)
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Не удалось установить команды для администратора {admin_id}: {e}"
+                )
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось зарегистрировать команды бота: {e}")
 
 
 async def main() -> None:
@@ -40,6 +82,12 @@ async def main() -> None:
     else:
         logger.info(f"✅ Администраторы: {ADMIN_USERS}")
 
+    logger.info(
+        "🌐 Языки: default=%s, поддерживаемые=%s",
+        DEFAULT_LANGUAGE,
+        ", ".join(SUPPORTED_LANGUAGES),
+    )
+
     # Инициализируем базу данных
     db = DatabaseService()
     await db.init_db()
@@ -53,52 +101,24 @@ async def main() -> None:
     # Получаем главный роутер
     main_router = get_main_router()
 
-    # Регистрируем middleware
-    main_router.message.middleware(DatabaseMiddleware(db))
-    main_router.message.middleware(UserAccessMiddleware(db))
-    main_router.inline_query.middleware(DatabaseMiddleware(db))
-    main_router.inline_query.middleware(UserAccessMiddleware(db))
-    main_router.chosen_inline_result.middleware(DatabaseMiddleware(db))
-    main_router.chosen_inline_result.middleware(UserAccessMiddleware(db))
-    main_router.callback_query.middleware(DatabaseMiddleware(db))
-    main_router.callback_query.middleware(UserAccessMiddleware(db))
+    # Регистрируем middleware. Порядок важен: Database → UserAccess → Locale.
+    # LocaleMiddleware читает данные из БД через data["db"], поэтому ставится
+    # после DatabaseMiddleware, и после UserAccessMiddleware — чтобы лишний раз
+    # не запрашивать язык для отклонённых пользователей.
+    for observer in (
+        main_router.message,
+        main_router.inline_query,
+        main_router.chosen_inline_result,
+        main_router.callback_query,
+    ):
+        observer.middleware(DatabaseMiddleware(db))
+        observer.middleware(UserAccessMiddleware(db))
+        observer.middleware(LocaleMiddleware())
 
     # Подключаем роутер
     dp.include_router(main_router)
 
-    # Регистрируем команды в меню бота
-    user_commands = [
-        BotCommand(command="start", description="Запустить бота"),
-        BotCommand(command="help", description="Справка по использованию"),
-        BotCommand(command="download", description="Скачать видео по URL"),
-        BotCommand(command="mp3", description="Извлечь аудио в MP3"),
-        BotCommand(command="voice", description="Конвертировать в голосовое сообщение"),
-        BotCommand(command="round", description="Конвертировать в кружок (видео-заметка)"),
-        BotCommand(command="gif", description="Конвертировать в GIF"),
-        BotCommand(command="id", description="Показать ваш Telegram ID"),
-    ]
-    admin_commands = user_commands + [
-        BotCommand(command="adduser", description="Добавить пользователя"),
-        BotCommand(command="removeuser", description="Удалить пользователя"),
-        BotCommand(command="users", description="Список пользователей"),
-        BotCommand(command="stats", description="Глобальная статистика"),
-        BotCommand(command="userstats", description="Статистика пользователя"),
-        BotCommand(command="adminhelp", description="Справка для администратора"),
-    ]
-
-    try:
-        await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
-        for admin_id in ADMIN_USERS:
-            try:
-                await bot.set_my_commands(
-                    admin_commands, scope=BotCommandScopeChat(chat_id=admin_id)
-                )
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ Не удалось установить команды для администратора {admin_id}: {e}"
-                )
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось зарегистрировать команды бота: {e}")
+    await _setup_bot_commands(bot, db)
 
     # Запускаем бота
     logger.info("🚀 Бот запущен!")

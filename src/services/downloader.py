@@ -67,13 +67,21 @@ def _is_instagram_cdn_host(hostname: Optional[str]) -> bool:
 
 @dataclass
 class DownloadResult:
-    """Результат скачивания видео."""
+    """Результат скачивания видео.
+
+    ``error`` — человекочитаемое сообщение (для логов и совместимости).
+    ``error_code`` — ключ перевода (например ``"downloader.error.private_video"``);
+    если задан, хендлер локализует его через ``i18n``. ``error_args`` — аргументы
+    форматирования для ``error_code``.
+    """
 
     success: bool
     file_path: Optional[str] = None
     title: Optional[str] = None
     duration: Optional[float] = None
     error: Optional[str] = None
+    error_code: Optional[str] = None
+    error_args: Optional[Dict[str, object]] = None
     from_cache: bool = False
     is_photo: bool = False
     photo_paths: Optional[list] = None
@@ -678,6 +686,7 @@ class VideoDownloader:
             return DownloadResult(
                 success=False,
                 error="URL не поддерживается. Поддерживаемые платформы: YouTube, Instagram, TikTok, X/Twitter",
+                error_code="downloader.error.unsupported_url",
             )
 
         cached = self.get_from_cache(url)
@@ -711,7 +720,13 @@ class VideoDownloader:
                 self.add_to_cache(url, result)
             return result
         except Exception as e:
-            return DownloadResult(success=False, error=f"Ошибка при скачивании: {str(e)}")
+            msg = str(e)
+            return DownloadResult(
+                success=False,
+                error=f"Ошибка при скачивании: {msg}",
+                error_code="downloader.error.download_exception",
+                error_args={"message": msg},
+            )
 
     def _try_instagram_photo(self, url: str) -> Optional[DownloadResult]:
         """
@@ -802,7 +817,9 @@ class VideoDownloader:
 
                 if info is None:
                     return DownloadResult(
-                        success=False, error="Не удалось получить информацию о видео"
+                        success=False,
+                        error="Не удалось получить информацию о видео",
+                        error_code="downloader.error.no_info",
                     )
 
                 logger.debug(
@@ -824,7 +841,9 @@ class VideoDownloader:
                             break
                     else:
                         return DownloadResult(
-                            success=False, error="Не удалось получить видео из плейлиста"
+                            success=False,
+                            error="Не удалось получить видео из плейлиста",
+                            error_code="downloader.error.no_playlist_video",
                         )
 
                 title = info.get("title", "Видео") if isinstance(info, dict) else "Видео"
@@ -858,13 +877,16 @@ class VideoDownloader:
                     actual_size = os.path.getsize(downloaded_file_path)
                     if actual_size > MAX_FILE_SIZE:
                         os.remove(downloaded_file_path)
+                        size_mb = actual_size // (1024 * 1024)
+                        max_mb = MAX_FILE_SIZE // (1024 * 1024)
                         return DownloadResult(
                             success=False,
                             error=(
                                 f"Скачанный файл слишком большой "
-                                f"({actual_size // (1024 * 1024)}MB). "
-                                f"Максимум: {MAX_FILE_SIZE // (1024 * 1024)}MB"
+                                f"({size_mb}MB). Максимум: {max_mb}MB"
                             ),
+                            error_code="downloader.error.file_too_large",
+                            error_args={"size_mb": size_mb, "max_mb": max_mb},
                         )
                     return DownloadResult(
                         success=True, file_path=downloaded_file_path, title=title, duration=duration
@@ -883,7 +905,11 @@ class VideoDownloader:
                         return DownloadResult(
                             success=True, file_path=found_file, title=title, duration=duration
                         )
-                    return DownloadResult(success=False, error="Файл не был скачан")
+                    return DownloadResult(
+                        success=False,
+                        error="Файл не был скачан",
+                        error_code="downloader.error.file_not_downloaded",
+                    )
 
         try:
             return attempt_download(url, ydl_opts)
@@ -941,19 +967,42 @@ class VideoDownloader:
                         "Нужен FFmpeg для скачивания этого видео (требуется склейка аудио+видео).\n"
                         "Установите FFmpeg и добавьте его в PATH, затем попробуйте ещё раз."
                     ),
+                    error_code="downloader.error.ffmpeg_required",
                 )
             if "Video unavailable" in error_msg:
-                return DownloadResult(success=False, error="Видео недоступно")
+                return DownloadResult(
+                    success=False,
+                    error="Видео недоступно",
+                    error_code="downloader.error.video_unavailable",
+                )
             elif "Private video" in error_msg:
-                return DownloadResult(success=False, error="Это приватное видео")
+                return DownloadResult(
+                    success=False,
+                    error="Это приватное видео",
+                    error_code="downloader.error.private_video",
+                )
             elif "Sign in" in error_msg or "login" in error_msg_lower:
                 return DownloadResult(
-                    success=False, error="Требуется авторизация для просмотра этого видео"
+                    success=False,
+                    error="Требуется авторизация для просмотра этого видео",
+                    error_code="downloader.error.auth_required",
                 )
             else:
-                return DownloadResult(success=False, error=f"Ошибка скачивания: {error_msg[:200]}")
+                truncated = error_msg[:200]
+                return DownloadResult(
+                    success=False,
+                    error=f"Ошибка скачивания: {truncated}",
+                    error_code="downloader.error.download_failed",
+                    error_args={"message": truncated},
+                )
         except Exception as e:
-            return DownloadResult(success=False, error=f"Неожиданная ошибка: {str(e)[:200]}")
+            truncated = str(e)[:200]
+            return DownloadResult(
+                success=False,
+                error=f"Неожиданная ошибка: {truncated}",
+                error_code="downloader.error.unexpected",
+                error_args={"message": truncated},
+            )
 
     def _find_downloaded_file(self, file_id: str) -> Optional[str]:
         """Находит скачанный файл по ID."""

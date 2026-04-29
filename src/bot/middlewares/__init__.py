@@ -1,5 +1,5 @@
 """Bot middlewares."""
 
-from .access import DatabaseMiddleware, UserAccessMiddleware
+from .access import DatabaseMiddleware, LocaleMiddleware, UserAccessMiddleware
 
-__all__ = ["UserAccessMiddleware", "DatabaseMiddleware"]
+__all__ = ["UserAccessMiddleware", "DatabaseMiddleware", "LocaleMiddleware"]

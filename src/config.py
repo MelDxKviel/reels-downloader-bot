@@ -3,11 +3,19 @@
 """
 
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Поддерживаемые языки интерфейса. Должны совпадать с ключами в src/locales/.
+SUPPORTED_LANGUAGES: Tuple[str, ...] = ("ru", "en")
+
+# Язык интерфейса по умолчанию (для пользователей без сохранённого выбора).
+# Если в .env указан неподдерживаемый код, откатываемся на "ru".
+_default_lang_env = os.getenv("DEFAULT_LANGUAGE", "ru").strip().lower()
+DEFAULT_LANGUAGE: str = _default_lang_env if _default_lang_env in SUPPORTED_LANGUAGES else "ru"
 
 # Токен бота из BotFather
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")

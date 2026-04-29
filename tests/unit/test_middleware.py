@@ -1,5 +1,5 @@
 """
-Tests for DatabaseMiddleware and UserAccessMiddleware.
+Tests for DatabaseMiddleware, UserAccessMiddleware and LocaleMiddleware.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiogram.types import CallbackQuery
 
-from src.bot.middlewares.access import DatabaseMiddleware, UserAccessMiddleware
+from src.bot.middlewares.access import (
+    DatabaseMiddleware,
+    LocaleMiddleware,
+    UserAccessMiddleware,
+)
+from src.services.i18n import Translator
 
 
 def make_callback(user_id: int):
@@ -191,3 +196,96 @@ async def test_callback_answer_swallows_exception(handler, mock_db):
 
     assert result is None
     cb.answer.assert_awaited_once()
+
+
+# ── LocaleMiddleware ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_locale_middleware_uses_stored_language(handler, mock_db):
+    mock_db.get_user_language = AsyncMock(return_value="en")
+    middleware = LocaleMiddleware()
+
+    msg = make_message(123)
+    msg.from_user.language_code = "ru"
+    data = {"db": mock_db}
+
+    await middleware(handler, msg, data)
+
+    assert data["lang"] == "en"
+    assert isinstance(data["t"], Translator)
+    assert data["t"]("common.cancel_button") == "❌ Cancel"
+
+
+@pytest.mark.asyncio
+async def test_locale_middleware_falls_back_to_telegram_lang(handler, mock_db):
+    mock_db.get_user_language = AsyncMock(return_value=None)
+    middleware = LocaleMiddleware()
+
+    msg = make_message(123)
+    msg.from_user.language_code = "en-US"
+    data = {"db": mock_db}
+
+    await middleware(handler, msg, data)
+
+    assert data["lang"] == "en"
+
+
+@pytest.mark.asyncio
+async def test_locale_middleware_falls_back_to_default(handler, mock_db):
+    mock_db.get_user_language = AsyncMock(return_value=None)
+    middleware = LocaleMiddleware()
+
+    msg = make_message(123)
+    msg.from_user.language_code = "fr"  # unsupported
+    data = {"db": mock_db}
+
+    with patch("src.bot.middlewares.access.DEFAULT_LANGUAGE", "ru"):
+        await middleware(handler, msg, data)
+
+    assert data["lang"] == "ru"
+
+
+@pytest.mark.asyncio
+async def test_locale_middleware_works_without_db(handler):
+    """If db is missing from data (shouldn't happen, but defensive), use defaults."""
+    middleware = LocaleMiddleware()
+
+    msg = make_message(123)
+    msg.from_user.language_code = "en"
+    data = {}
+
+    await middleware(handler, msg, data)
+
+    assert data["lang"] == "en"
+    assert isinstance(data["t"], Translator)
+
+
+@pytest.mark.asyncio
+async def test_locale_middleware_no_user_uses_default(handler, mock_db):
+    middleware = LocaleMiddleware()
+
+    event = MagicMock()
+    event.from_user = None
+    data = {"db": mock_db}
+
+    await middleware(handler, event, data)
+
+    # Should still inject sensible defaults so handlers don't crash on data["t"].
+    assert "lang" in data
+    assert isinstance(data["t"], Translator)
+
+
+@pytest.mark.asyncio
+async def test_locale_middleware_db_failure_fallback(handler, mock_db):
+    mock_db.get_user_language = AsyncMock(side_effect=RuntimeError("db down"))
+    middleware = LocaleMiddleware()
+
+    msg = make_message(123)
+    msg.from_user.language_code = "en"
+    data = {"db": mock_db}
+
+    await middleware(handler, msg, data)
+
+    # Falls through to Telegram language code when DB lookup fails.
+    assert data["lang"] == "en"

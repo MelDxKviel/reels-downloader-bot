@@ -26,6 +26,7 @@ from aiogram.types import (
 from src.config import DOWNLOAD_DIR
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
+from src.services.i18n import Translator, translate_download_error
 from src.services.url_utils import extract_url
 
 logger = logging.getLogger(__name__)
@@ -39,10 +40,14 @@ class RoundStates(StatesGroup):
     waiting_for_input = State()
 
 
-def _cancel_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def _cancel_keyboard(user_id: int, t: Translator) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_round:{user_id}")]
+            [
+                InlineKeyboardButton(
+                    text=t("common.cancel_button"), callback_data=f"cancel_round:{user_id}"
+                )
+            ]
         ]
     )
 
@@ -109,16 +114,15 @@ async def _send_round(
     file_path: str,
     platform: str,
     url: str,
+    t: Translator,
 ) -> None:
     """Конвертирует файл и отправляет как video note."""
-    await status_msg.edit_text("🔄 Конвертирую в кружок...")
+    await status_msg.edit_text(t("round.convert_status"))
 
     round_path = await _convert_to_round(file_path)
 
     if round_path is None:
-        await status_msg.edit_text(
-            "❌ <b>Ошибка конвертации</b>\n\nFFmpeg не найден или произошла ошибка обработки."
-        )
+        await status_msg.edit_text(t("round.convert_error"))
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
@@ -133,7 +137,7 @@ async def _send_round(
         logger.info("✅ Кружок отправлен (пользователь: %s)", message.from_user.id)
     except Exception as e:
         logger.error("Ошибка при отправке кружка: %s", e, exc_info=True)
-        await status_msg.edit_text("❌ <b>Ошибка при отправке</b>\n\nПопробуйте позже.")
+        await status_msg.edit_text(t("round.send_error"))
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
@@ -149,34 +153,37 @@ async def _download_and_send_round(
     db: DatabaseService,
     status_msg: Message,
     url: str,
+    t: Translator,
 ) -> None:
     """Скачивает видео по URL и отправляет как кружок."""
     platform = downloader.get_platform_name(url)
-    await status_msg.edit_text(f"⏳ Скачиваю видео с <b>{platform}</b>...")
+    await status_msg.edit_text(t("round.download_status", platform=platform))
 
     try:
         result = await downloader.download(url)
     except Exception as e:
         logger.error("Ошибка скачивания: %s", e, exc_info=True)
-        await status_msg.edit_text("❌ <b>Ошибка при скачивании</b>\n\nПопробуйте позже.")
+        await status_msg.edit_text(t("round.download_error"))
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
         return
 
     if not result.success:
-        reason = html.escape(result.error or "Неизвестная ошибка")
-        await status_msg.edit_text(f"❌ <b>Не удалось скачать видео</b>\n\nПричина: {reason}")
+        reason = html.escape(translate_download_error(t, result))
+        await status_msg.edit_text(t("round.failed", reason=reason))
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
         return
 
-    await _send_round(message, db, status_msg, result.file_path, platform, url)
+    await _send_round(message, db, status_msg, result.file_path, platform, url, t)
 
 
 @router.message(Command("round"))
-async def cmd_round(message: Message, state: FSMContext, db: DatabaseService) -> None:
+async def cmd_round(
+    message: Message, state: FSMContext, db: DatabaseService, t: Translator
+) -> None:
     """Обработчик /round — принимает URL в команде или переходит в режим ожидания."""
     text = message.text or ""
     parts = text.split(maxsplit=1)
@@ -186,21 +193,20 @@ async def cmd_round(message: Message, state: FSMContext, db: DatabaseService) ->
 
     if url:
         await state.clear()
-        status_msg = await message.answer("⏳ Обрабатываю...")
-        await _download_and_send_round(message, db, status_msg, url)
+        status_msg = await message.answer(t("common.processing"))
+        await _download_and_send_round(message, db, status_msg, url, t)
         return
 
     prompt = await message.answer(
-        "🎥 Отправьте ссылку на видео или mp4-файл.\n\n"
-        "⏱ Максимальная длительность кружка: <b>60 секунд</b>",
-        reply_markup=_cancel_keyboard(message.from_user.id),
+        t("round.prompt"),
+        reply_markup=_cancel_keyboard(message.from_user.id, t),
     )
     await state.set_state(RoundStates.waiting_for_input)
     await state.update_data(prompt_message_id=prompt.message_id)
 
 
 @router.callback_query(F.data.startswith("cancel_round:"))
-async def cancel_round(callback: CallbackQuery, state: FSMContext) -> None:
+async def cancel_round(callback: CallbackQuery, state: FSMContext, t: Translator) -> None:
     """Отмена ожидания — только инициатор может отменить."""
     try:
         owner_id = int(callback.data.split(":", 1)[1])
@@ -208,22 +214,22 @@ async def cancel_round(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     if callback.from_user.id != owner_id:
-        await callback.answer("Это не ваша операция.", show_alert=True)
+        await callback.answer(t("common.not_your_operation"), show_alert=True)
         return
     await state.clear()
-    await callback.message.edit_text("❌ Создание кружка отменено.")
+    await callback.message.edit_text(t("round.cancelled"))
     await callback.answer()
 
 
 @router.message(RoundStates.waiting_for_input, F.text)
-async def round_got_url(message: Message, state: FSMContext, db: DatabaseService) -> None:
+async def round_got_url(
+    message: Message, state: FSMContext, db: DatabaseService, t: Translator
+) -> None:
     """Получена ссылка в режиме ожидания."""
     url = extract_url(message.text)
 
     if not url:
-        await message.answer(
-            "🤔 Ссылка не найдена. Отправьте ссылку на видео или нажмите ❌ для отмены."
-        )
+        await message.answer(t("round.url_not_found"))
         return
 
     data = await state.get_data()
@@ -236,19 +242,21 @@ async def round_got_url(message: Message, state: FSMContext, db: DatabaseService
         except Exception:
             pass
 
-    status_msg = await message.answer("⏳ Обрабатываю...")
-    await _download_and_send_round(message, db, status_msg, url)
+    status_msg = await message.answer(t("common.processing"))
+    await _download_and_send_round(message, db, status_msg, url, t)
 
 
 @router.message(RoundStates.waiting_for_input, F.video | F.document)
-async def round_got_video(message: Message, state: FSMContext, db: DatabaseService) -> None:
+async def round_got_video(
+    message: Message, state: FSMContext, db: DatabaseService, t: Translator
+) -> None:
     """Получен видеофайл в режиме ожидания."""
     if message.video:
         file_id = message.video.file_id
     elif message.document:
         mime = message.document.mime_type or ""
         if not mime.startswith("video/"):
-            await message.answer("⚠️ Это не видеофайл. Отправьте mp4 или ссылку на видео.")
+            await message.answer(t("round.not_video"))
             return
         file_id = message.document.file_id
     else:
@@ -264,7 +272,7 @@ async def round_got_video(message: Message, state: FSMContext, db: DatabaseServi
         except Exception:
             pass
 
-    status_msg = await message.answer("⏳ Загружаю видео...")
+    status_msg = await message.answer(t("round.upload_video_status"))
     upload_path = str(Path(DOWNLOAD_DIR) / f"upload_{uuid.uuid4().hex[:8]}.mp4")
 
     try:
@@ -273,7 +281,7 @@ async def round_got_video(message: Message, state: FSMContext, db: DatabaseServi
             await message.bot.download_file(tg_file.file_path, destination=upload_path)
         except Exception as e:
             logger.error("Ошибка загрузки файла из Telegram: %s", e, exc_info=True)
-            await status_msg.edit_text("❌ <b>Не удалось загрузить файл</b>")
+            await status_msg.edit_text(t("round.upload_failed"))
             return
         await _send_round(
             message,
@@ -282,6 +290,7 @@ async def round_got_video(message: Message, state: FSMContext, db: DatabaseServi
             upload_path,
             "Upload",
             f"upload:{message.from_user.id}",
+            t,
         )
     finally:
         if os.path.exists(upload_path):
