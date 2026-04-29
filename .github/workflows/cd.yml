@@ -63,7 +63,9 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
           script: |
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.DEPLOY_USER }}" --password-stdin
             cd ${{ secrets.DEPLOY_PATH }}
             docker compose pull bot
             docker compose up -d bot
             docker image prune -f
+            docker logout ghcr.io
