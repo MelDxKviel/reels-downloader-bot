@@ -6,9 +6,16 @@ import logging
 from datetime import timedelta
 from typing import Optional, Tuple
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from src.config import ADMIN_USERS
 from src.services.database import DatabaseService, _utcnow
@@ -19,13 +26,11 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-async def get_user_display_info(bot: Bot, user_id: int) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Получает информацию о пользователе через Telegram API.
+class AdminStates(StatesGroup):
+    waiting_for_user_id = State()
 
-    Returns:
-        (full_name, username) - имя и ник, или (None, None) если не удалось получить
-    """
+
+async def get_user_display_info(bot: Bot, user_id: int) -> Tuple[Optional[str], Optional[str]]:
     try:
         chat = await bot.get_chat(user_id)
         full_name = chat.full_name or chat.first_name or None
@@ -50,27 +55,24 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_USERS
 
 
-@router.message(Command("adduser"))
-async def cmd_adduser(message: Message, db: DatabaseService, bot: Bot, t: Translator) -> None:
-    """Добавляет пользователя в список разрешённых."""
-    if not is_admin(message.from_user.id):
-        await message.answer(t("admin.only"))
-        return
+def _cancel_keyboard(user_id: int, action: str, t: Translator) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t("common.cancel_button"),
+                    callback_data=f"cancel_admin:{user_id}:{action}",
+                )
+            ]
+        ]
+    )
 
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.answer(t("admin.adduser.usage"))
-        return
 
-    try:
-        user_id = int(args[1].strip())
-    except ValueError:
-        await message.answer(t("admin.invalid_id"))
-        return
-
+async def _do_adduser(
+    message: Message, db: DatabaseService, bot: Bot, t: Translator, user_id: int
+) -> None:
     success = await db.add_user(user_id)
     if success:
-        # Пробуем подтянуть информацию о пользователе
         full_name, username = await get_user_display_info(bot, user_id)
         user_info = format_user_info(user_id, full_name, username)
         await message.answer(t("admin.adduser.success", info=user_info))
@@ -79,27 +81,11 @@ async def cmd_adduser(message: Message, db: DatabaseService, bot: Bot, t: Transl
         await message.answer(t("admin.adduser.exists", user_id=user_id))
 
 
-@router.message(Command("removeuser"))
-async def cmd_removeuser(message: Message, db: DatabaseService, bot: Bot, t: Translator) -> None:
-    """Удаляет пользователя из списка разрешённых."""
-    if not is_admin(message.from_user.id):
-        await message.answer(t("admin.only"))
-        return
-
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.answer(t("admin.removeuser.usage"))
-        return
-
-    try:
-        user_id = int(args[1].strip())
-    except ValueError:
-        await message.answer(t("admin.invalid_id"))
-        return
-
+async def _do_removeuser(
+    message: Message, db: DatabaseService, bot: Bot, t: Translator, user_id: int
+) -> None:
     success = await db.remove_user(user_id)
     if success:
-        # Пробуем подтянуть информацию о пользователе
         full_name, username = await get_user_display_info(bot, user_id)
         user_info = format_user_info(user_id, full_name, username)
         await message.answer(t("admin.removeuser.success", info=user_info))
@@ -108,100 +94,15 @@ async def cmd_removeuser(message: Message, db: DatabaseService, bot: Bot, t: Tra
         await message.answer(t("admin.removeuser.not_found", user_id=user_id))
 
 
-@router.message(Command("users"))
-async def cmd_users(message: Message, db: DatabaseService, bot: Bot, t: Translator) -> None:
-    """Показывает список разрешённых пользователей."""
-    if not is_admin(message.from_user.id):
-        await message.answer(t("admin.only"))
-        return
-
-    users = await db.get_all_users()
-
-    if not users:
-        await message.answer(t("admin.users.empty"))
-        return
-
-    lines = [t("admin.users.title") + "\n"]
-    for i, user in enumerate(users, 1):
-        status = "✅" if user.is_active else "❌"
-        created = (
-            user.created_at.strftime("%d.%m.%Y")
-            if user.created_at
-            else t("admin.users.date_unknown")
-        )
-
-        # Подтягиваем актуальную информацию о пользователе
-        full_name, username = await get_user_display_info(bot, user.user_id)
-        user_info = format_user_info(user.user_id, full_name, username)
-
-        added_label = t("admin.users.added_at", date=created)
-        lines.append(f"{i}. {status} {user_info}\n    <i>{added_label}</i>")
-
-    await message.answer("\n".join(lines))
-
-
-@router.message(Command("stats"))
-async def cmd_stats(message: Message, db: DatabaseService, t: Translator) -> None:
-    """Показывает общую статистику использования бота."""
-    if not is_admin(message.from_user.id):
-        await message.answer(t("admin.only"))
-        return
-
-    stats = await db.get_global_stats()
-
-    # Статистика за последние 24 часа
-    now = _utcnow()
-    since_24h = now - timedelta(hours=24)
-    stats_24h = await db.get_global_stats(since=since_24h)
-
-    # Статистика за последние 7 дней
-    since_7d = now - timedelta(days=7)
-    stats_7d = await db.get_global_stats(since=since_7d)
-
-    text = t(
-        "admin.stats.text",
-        total=stats["total_downloads"],
-        success=stats["successful_downloads"],
-        failed=stats["failed_downloads"],
-        active=stats["active_users"],
-        total_24h=stats_24h["total_downloads"],
-        success_24h=stats_24h["successful_downloads"],
-        total_7d=stats_7d["total_downloads"],
-        success_7d=stats_7d["successful_downloads"],
-    )
-
-    for platform, count in stats.get("by_platform", {}).items():
-        text += f"• {platform}: {count}\n"
-
-    await message.answer(text)
-
-
-@router.message(Command("userstats"))
-async def cmd_userstats(message: Message, db: DatabaseService, bot: Bot, t: Translator) -> None:
-    """Показывает статистику по конкретному пользователю."""
-    if not is_admin(message.from_user.id):
-        await message.answer(t("admin.only"))
-        return
-
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.answer(t("admin.userstats.usage"))
-        return
-
-    try:
-        user_id = int(args[1].strip())
-    except ValueError:
-        await message.answer(t("admin.invalid_id"))
-        return
-
+async def _do_userstats(
+    message: Message, db: DatabaseService, bot: Bot, t: Translator, user_id: int
+) -> None:
     user = await db.get_user(user_id)
     if not user:
         await message.answer(t("admin.removeuser.not_found", user_id=user_id))
         return
 
     stats = await db.get_user_stats(user_id)
-
-    # Подтягиваем актуальную информацию о пользователе через Telegram API
     full_name, username = await get_user_display_info(bot, user_id)
 
     created = (
@@ -241,6 +142,158 @@ async def cmd_userstats(message: Message, db: DatabaseService, bot: Bot, t: Tran
     await message.answer(text)
 
 
+@router.message(Command("adduser"))
+async def cmd_adduser(
+    message: Message, db: DatabaseService, bot: Bot, t: Translator, state: FSMContext
+) -> None:
+    """Добавляет пользователя в список разрешённых."""
+    if not is_admin(message.from_user.id):
+        await message.answer(t("admin.only"))
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        prompt = await message.answer(
+            t("admin.adduser.prompt"),
+            reply_markup=_cancel_keyboard(message.from_user.id, "adduser", t),
+        )
+        await state.set_state(AdminStates.waiting_for_user_id)
+        await state.update_data(action="adduser", prompt_message_id=prompt.message_id)
+        return
+
+    try:
+        user_id = int(args[1].strip())
+    except ValueError:
+        await message.answer(t("admin.invalid_id"))
+        return
+
+    await state.clear()
+    await _do_adduser(message, db, bot, t, user_id)
+
+
+@router.message(Command("removeuser"))
+async def cmd_removeuser(
+    message: Message, db: DatabaseService, bot: Bot, t: Translator, state: FSMContext
+) -> None:
+    """Удаляет пользователя из списка разрешённых."""
+    if not is_admin(message.from_user.id):
+        await message.answer(t("admin.only"))
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        prompt = await message.answer(
+            t("admin.removeuser.prompt"),
+            reply_markup=_cancel_keyboard(message.from_user.id, "removeuser", t),
+        )
+        await state.set_state(AdminStates.waiting_for_user_id)
+        await state.update_data(action="removeuser", prompt_message_id=prompt.message_id)
+        return
+
+    try:
+        user_id = int(args[1].strip())
+    except ValueError:
+        await message.answer(t("admin.invalid_id"))
+        return
+
+    await state.clear()
+    await _do_removeuser(message, db, bot, t, user_id)
+
+
+@router.message(Command("users"))
+async def cmd_users(message: Message, db: DatabaseService, bot: Bot, t: Translator) -> None:
+    """Показывает список разрешённых пользователей."""
+    if not is_admin(message.from_user.id):
+        await message.answer(t("admin.only"))
+        return
+
+    users = await db.get_all_users()
+
+    if not users:
+        await message.answer(t("admin.users.empty"))
+        return
+
+    lines = [t("admin.users.title") + "\n"]
+    for i, user in enumerate(users, 1):
+        status = "✅" if user.is_active else "❌"
+        created = (
+            user.created_at.strftime("%d.%m.%Y")
+            if user.created_at
+            else t("admin.users.date_unknown")
+        )
+
+        full_name, username = await get_user_display_info(bot, user.user_id)
+        user_info = format_user_info(user.user_id, full_name, username)
+
+        added_label = t("admin.users.added_at", date=created)
+        lines.append(f"{i}. {status} {user_info}\n    <i>{added_label}</i>")
+
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, db: DatabaseService, t: Translator) -> None:
+    """Показывает общую статистику использования бота."""
+    if not is_admin(message.from_user.id):
+        await message.answer(t("admin.only"))
+        return
+
+    stats = await db.get_global_stats()
+
+    now = _utcnow()
+    since_24h = now - timedelta(hours=24)
+    stats_24h = await db.get_global_stats(since=since_24h)
+
+    since_7d = now - timedelta(days=7)
+    stats_7d = await db.get_global_stats(since=since_7d)
+
+    text = t(
+        "admin.stats.text",
+        total=stats["total_downloads"],
+        success=stats["successful_downloads"],
+        failed=stats["failed_downloads"],
+        active=stats["active_users"],
+        total_24h=stats_24h["total_downloads"],
+        success_24h=stats_24h["successful_downloads"],
+        total_7d=stats_7d["total_downloads"],
+        success_7d=stats_7d["successful_downloads"],
+    )
+
+    for platform, count in stats.get("by_platform", {}).items():
+        text += f"• {platform}: {count}\n"
+
+    await message.answer(text)
+
+
+@router.message(Command("userstats"))
+async def cmd_userstats(
+    message: Message, db: DatabaseService, bot: Bot, t: Translator, state: FSMContext
+) -> None:
+    """Показывает статистику по конкретному пользователю."""
+    if not is_admin(message.from_user.id):
+        await message.answer(t("admin.only"))
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        prompt = await message.answer(
+            t("admin.userstats.prompt"),
+            reply_markup=_cancel_keyboard(message.from_user.id, "userstats", t),
+        )
+        await state.set_state(AdminStates.waiting_for_user_id)
+        await state.update_data(action="userstats", prompt_message_id=prompt.message_id)
+        return
+
+    try:
+        user_id = int(args[1].strip())
+    except ValueError:
+        await message.answer(t("admin.invalid_id"))
+        return
+
+    await state.clear()
+    await _do_userstats(message, db, bot, t, user_id)
+
+
 @router.message(Command("adminhelp"))
 async def cmd_adminhelp(message: Message, t: Translator) -> None:
     """Показывает справку по командам администратора."""
@@ -249,3 +302,61 @@ async def cmd_adminhelp(message: Message, t: Translator) -> None:
         return
 
     await message.answer(t("admin.adminhelp.text"))
+
+
+@router.callback_query(F.data.startswith("cancel_admin:"))
+async def cancel_admin(callback: CallbackQuery, state: FSMContext, t: Translator) -> None:
+    parts = callback.data.split(":")
+    owner_id = int(parts[1])
+    btn_action = parts[2] if len(parts) > 2 else ""
+
+    if callback.from_user.id != owner_id:
+        await callback.answer(t("common.not_your_operation"), show_alert=True)
+        return
+
+    data = await state.get_data()
+    current_action = data.get("action", "")
+
+    if btn_action != current_action:
+        await callback.answer(t("admin.stale_prompt"), show_alert=True)
+        return
+
+    cancelled_key = {
+        "adduser": "admin.adduser.cancelled",
+        "removeuser": "admin.removeuser.cancelled",
+        "userstats": "admin.userstats.cancelled",
+    }.get(current_action, "admin.adduser.cancelled")
+
+    await state.clear()
+    await callback.message.edit_text(t(cancelled_key))
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_for_user_id, F.text)
+async def admin_got_user_id(
+    message: Message, state: FSMContext, db: DatabaseService, bot: Bot, t: Translator
+) -> None:
+    try:
+        user_id = int(message.text.strip())
+    except ValueError:
+        await message.answer(t("admin.id_not_found"))
+        return
+
+    data = await state.get_data()
+    action = data.get("action")
+    prompt_id = data.get("prompt_message_id")
+
+    await state.clear()
+
+    if prompt_id:
+        try:
+            await message.bot.delete_message(message.chat.id, prompt_id)
+        except Exception:
+            pass
+
+    if action == "adduser":
+        await _do_adduser(message, db, bot, t, user_id)
+    elif action == "removeuser":
+        await _do_removeuser(message, db, bot, t, user_id)
+    elif action == "userstats":
+        await _do_userstats(message, db, bot, t, user_id)
