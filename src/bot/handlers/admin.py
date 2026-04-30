@@ -55,13 +55,13 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_USERS
 
 
-def _cancel_keyboard(user_id: int, t: Translator) -> InlineKeyboardMarkup:
+def _cancel_keyboard(user_id: int, action: str, t: Translator) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text=t("common.cancel_button"),
-                    callback_data=f"cancel_admin:{user_id}",
+                    callback_data=f"cancel_admin:{user_id}:{action}",
                 )
             ]
         ]
@@ -155,7 +155,7 @@ async def cmd_adduser(
     if len(args) < 2:
         prompt = await message.answer(
             t("admin.adduser.prompt"),
-            reply_markup=_cancel_keyboard(message.from_user.id, t),
+            reply_markup=_cancel_keyboard(message.from_user.id, "adduser", t),
         )
         await state.set_state(AdminStates.waiting_for_user_id)
         await state.update_data(action="adduser", prompt_message_id=prompt.message_id)
@@ -184,7 +184,7 @@ async def cmd_removeuser(
     if len(args) < 2:
         prompt = await message.answer(
             t("admin.removeuser.prompt"),
-            reply_markup=_cancel_keyboard(message.from_user.id, t),
+            reply_markup=_cancel_keyboard(message.from_user.id, "removeuser", t),
         )
         await state.set_state(AdminStates.waiting_for_user_id)
         await state.update_data(action="removeuser", prompt_message_id=prompt.message_id)
@@ -278,7 +278,7 @@ async def cmd_userstats(
     if len(args) < 2:
         prompt = await message.answer(
             t("admin.userstats.prompt"),
-            reply_markup=_cancel_keyboard(message.from_user.id, t),
+            reply_markup=_cancel_keyboard(message.from_user.id, "userstats", t),
         )
         await state.set_state(AdminStates.waiting_for_user_id)
         await state.update_data(action="userstats", prompt_message_id=prompt.message_id)
@@ -306,18 +306,26 @@ async def cmd_adminhelp(message: Message, t: Translator) -> None:
 
 @router.callback_query(F.data.startswith("cancel_admin:"))
 async def cancel_admin(callback: CallbackQuery, state: FSMContext, t: Translator) -> None:
-    owner_id = int(callback.data.split(":")[1])
+    parts = callback.data.split(":")
+    owner_id = int(parts[1])
+    btn_action = parts[2] if len(parts) > 2 else ""
+
     if callback.from_user.id != owner_id:
         await callback.answer(t("common.not_your_operation"), show_alert=True)
         return
 
     data = await state.get_data()
-    action = data.get("action", "")
+    current_action = data.get("action", "")
+
+    if btn_action != current_action:
+        await callback.answer(t("admin.stale_prompt"), show_alert=True)
+        return
+
     cancelled_key = {
         "adduser": "admin.adduser.cancelled",
         "removeuser": "admin.removeuser.cancelled",
         "userstats": "admin.userstats.cancelled",
-    }.get(action, "admin.adduser.cancelled")
+    }.get(current_action, "admin.adduser.cancelled")
 
     await state.clear()
     await callback.message.edit_text(t(cancelled_key))

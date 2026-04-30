@@ -105,6 +105,7 @@
   "admin.only": "⛔ Эта команда доступна только администраторам.",
   "admin.invalid_id": "❌ Некорректный ID пользователя. Укажите числовой ID.",
   "admin.id_not_found": "🤔 ID не найден. Отправьте числовой Telegram ID или нажмите ❌ для отмены.",
+  "admin.stale_prompt": "Этот запрос уже неактуален.",
   "admin.adduser.usage": "📝 <b>Использование:</b>\n<code>/adduser USER_ID</code>\n\nПример: <code>/adduser 123456789</code>",
   "admin.adduser.prompt": "👤 Отправьте Telegram ID пользователя, которого хотите добавить.",
   "admin.adduser.cancelled": "❌ Добавление пользователя отменено.",

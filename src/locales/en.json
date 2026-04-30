@@ -105,6 +105,7 @@
   "admin.only": "⛔ This command is for admins only.",
   "admin.invalid_id": "❌ Invalid user ID. Provide a numeric ID.",
   "admin.id_not_found": "🤔 ID not found. Send a numeric Telegram ID or press ❌ to cancel.",
+  "admin.stale_prompt": "This prompt is no longer active.",
   "admin.adduser.usage": "📝 <b>Usage:</b>\n<code>/adduser USER_ID</code>\n\nExample: <code>/adduser 123456789</code>",
   "admin.adduser.prompt": "👤 Send the Telegram ID of the user you want to add.",
   "admin.adduser.cancelled": "❌ Adding user cancelled.",
