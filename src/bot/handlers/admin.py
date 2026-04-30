@@ -167,6 +167,7 @@ async def cmd_adduser(
         await message.answer(t("admin.invalid_id"))
         return
 
+    await state.clear()
     await _do_adduser(message, db, bot, t, user_id)
 
 
@@ -195,6 +196,7 @@ async def cmd_removeuser(
         await message.answer(t("admin.invalid_id"))
         return
 
+    await state.clear()
     await _do_removeuser(message, db, bot, t, user_id)
 
 
@@ -288,6 +290,7 @@ async def cmd_userstats(
         await message.answer(t("admin.invalid_id"))
         return
 
+    await state.clear()
     await _do_userstats(message, db, bot, t, user_id)
 
 
