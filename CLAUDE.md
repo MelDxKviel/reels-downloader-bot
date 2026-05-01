@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Telegram bot that downloads videos from YouTube, Instagram Reels, TikTok, and X/Twitter using `yt-dlp`. Built with Python 3.11+, aiogram 3.x (async), SQLAlchemy async ORM, and PostgreSQL. Supports whitelist-based access control, per-user download statistics, format conversion (MP3, voice, GIF, video note), and inline-mode downloads.
+A Telegram bot that downloads videos from YouTube, Instagram Reels, TikTok, and X/Twitter using `yt-dlp`. Built with Python 3.11+, aiogram 3.x (async), SQLAlchemy async ORM, and PostgreSQL. Supports whitelist-based access control, per-user download statistics, format conversion (MP3, voice, GIF, video note), inline-mode downloads, and a bilingual interface (Russian / English) with per-user language preference.
 
 ## Commands
 
@@ -36,10 +36,11 @@ Schema is auto-created on startup via `Base.metadata.create_all()` — no migrat
 
 ### Request Lifecycle
 
-1. aiogram receives a Telegram update and passes it through two middlewares (in order):
+1. aiogram receives a Telegram update and passes it through three middlewares (in order):
    - `DatabaseMiddleware` — injects a `DatabaseService` instance into handler `data`
    - `UserAccessMiddleware` — silently drops messages from non-admin, non-whitelisted users
-2. The update is routed through routers in priority order: `admin_router` → `common_router` → `download_cmd_router` → `mp3_router` → `voice_router` → `gif_router` → `round_router` → `download_router` → `inline_router`
+   - `LocaleMiddleware` — resolves the user's language (DB preference → Telegram `language_code` → `DEFAULT_LANGUAGE`) and injects `lang: str` and `t: Translator` into handler `data`
+2. The update is routed through routers in priority order: `admin_router` → `language_router` → `common_router` → `download_cmd_router` → `mp3_router` → `voice_router` → `gif_router` → `round_router` → `download_router` → `inline_router`
 3. Download handlers call `VideoDownloader.download(url)`, which checks an in-memory/JSON cache before spawning yt-dlp in a thread executor (`loop.run_in_executor`)
 4. Results are uploaded to Telegram; both successes and failures are recorded via `DatabaseService.record_download()`
 
@@ -61,13 +62,16 @@ Schema is auto-created on startup via `Base.metadata.create_all()` — no migrat
 
 **Inline mode**: The bot supports inline queries (`@bot <url>`). Results are returned as cached file_ids when available, or as placeholder Article results with a loading keyboard. On selection (`chosen_inline_result`), the video/photo/MP3 is downloaded, uploaded to `VIDEO_STORAGE_CHAT_ID` (falls back to `ADMIN_USERS[0]`), and the inline message is edited with the real media. The reply_markup (keyboard) must be present on the placeholder for Telegram to send `inline_message_id`. BotFather inline feedback must be set to 100% for `chosen_inline_result` to fire.
 
+**i18n / localization**: The bot supports Russian and English. Translation strings live in `src/locales/ru.json` and `src/locales/en.json` and are loaded once at import time by `src/locales/__init__.py` into the `LOCALE_MESSAGES` dict. `src/services/i18n.py` exposes `get_text(key, lang)` and the `Translator` class (a callable bound to one language). `LocaleMiddleware` injects a `Translator` instance as `t` into every handler's `data`, so handlers call `t("key")` without threading language state themselves. Users select their language via `/language`; the preference is stored in `UserPreference` and takes priority over the Telegram client's `language_code`. Supported languages are declared in `SUPPORTED_LANGUAGES` (`config.py`); the default is `DEFAULT_LANGUAGE` (env var, falls back to `"ru"`). Adding a new language requires a new JSON file and an entry in `SUPPORTED_LANGUAGES`. Command menus are registered per-language at startup via `BotCommandScopeAllPrivateChats(language_code=...)` and updated per-admin chat when they switch language.
+
 ### Module Map
 
 ```
 src/
 ├── main.py                — Bot startup, middleware/router registration, graceful shutdown
-├── config.py              — Env vars, constants (MAX_FILE_SIZE=50MB, DOWNLOAD_TIMEOUT=300s)
+├── config.py              — Env vars, constants (MAX_FILE_SIZE=50MB, DOWNLOAD_TIMEOUT=300s, SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE)
 ├── bot/
+│   ├── commands.py            — Localized BotCommand list builders: user_commands(t), admin_commands(t)
 │   ├── handlers/
 │   │   ├── __init__.py        — get_main_router(), aggregates all sub-routers in priority order
 │   │   ├── common.py          — /start, /help, /id, /cache, /clearcache
@@ -78,20 +82,27 @@ src/
 │   │   ├── mp3.py             — /mp3: FFmpeg libmp3lame audio extraction (VBR q=2)
 │   │   ├── voice.py           — /voice: FFmpeg libopus OGG voice message (64kbps, 48kHz, mono)
 │   │   ├── inline.py          — Inline-mode handler: cached results, storage-chat upload flow
+│   │   ├── language.py        — /language command + set_lang callback; updates admin command scope on change
 │   │   └── admin.py           — /adduser, /removeuser, /users, /stats, /userstats, /adminhelp
 │   └── middlewares/
-│       └── access.py          — DatabaseMiddleware, UserAccessMiddleware
+│       └── access.py          — DatabaseMiddleware, UserAccessMiddleware, LocaleMiddleware
+├── locales/
+│   ├── __init__.py            — Loads *.json locale files into LOCALE_MESSAGES dict at import time
+│   ├── en.json                — English translation strings
+│   └── ru.json                — Russian translation strings
 └── services/
     ├── downloader.py          — VideoDownloader class, yt-dlp wrapper, cache, Instagram logic
-    ├── database.py            — DatabaseService class, User/DownloadStats ORM models
+    ├── database.py            — DatabaseService class, User/DownloadStats/UserPreference ORM models
+    ├── i18n.py                — get_text(), Translator class, normalize_language(), translate_download_error()
     └── url_utils.py           — URL normalization, platform detection, kkinstagram fallback
 ```
 
 ### Database Schema
 
-Two SQLAlchemy models defined in `src/services/database.py`:
+Three SQLAlchemy models defined in `src/services/database.py`:
 - `User`: `user_id` (BigInteger, unique), `is_active` (soft delete), `created_at`
 - `DownloadStats`: `user_id`, `platform`, `url`, `success`, `created_at`
+- `UserPreference`: `user_id` (BigInteger, unique), `language` (String(8)), `created_at`, `updated_at` — stored separately from `User` so admins (who are not in the whitelist) can also save a language preference
 
 Schema is created automatically on startup; Alembic is installed but not configured.
 
@@ -103,6 +114,7 @@ Schema is created automatically on startup; Alembic is installed but not configu
 | `ADMIN_USERS` | Yes | Comma-separated Telegram user IDs |
 | `DATABASE_URL` | Yes | `postgresql+asyncpg://...` |
 | `DOWNLOAD_DIR` | No | Default: `downloads` |
+| `DEFAULT_LANGUAGE` | No | Default UI language code (`ru` or `en`); falls back to `"ru"` if unsupported |
 | `YT_COOKIES_FILE` | No | Netscape-format cookies for age-restricted YouTube |
 | `INSTA_COOKIES_FILE` | No | Netscape-format cookies for Instagram (private accounts, auth errors) |
 | `VIDEO_STORAGE_CHAT_ID` | No | Chat for inline-mode file uploads; fallback: `ADMIN_USERS[0]` |
@@ -121,6 +133,7 @@ uv run pytest
 - `test_config.py` — env var loading
 - `test_database.py` — user/stats CRUD operations
 - `test_downloader.py` — URL hashing, cache, platform detection, Instagram HTML parsing
+- `test_i18n.py` — translation key lookup, fallback, Translator class, normalize_language
 - `test_middleware.py` — access control enforcement
 - `test_url_utils.py` — URL extraction, normalization, platform detection
 
@@ -129,7 +142,9 @@ uv run pytest
 - HTML parse mode is set globally on the Bot instance; handlers use `<code>`, `<b>` tags directly in strings
 - User-facing messages use emoji prefixes (✅ ❌ ⏳ 📤) — match existing patterns when adding handlers
 - All database operations use `async with session:` context managers; never reuse sessions across calls
-- Handlers receive `db: DatabaseService` from middleware data, not from direct import
+- Handlers receive `db: DatabaseService` and `t: Translator` from middleware data, not from direct import
 - Admin commands all call `is_admin(message.from_user.id)` as first guard
 - All conversion handlers (`/round`, `/gif`, `/mp3`, `/voice`) accept both a URL argument and a direct file upload (video/audio/document)
 - URL utilities belong in `src/services/url_utils.py`, not inline in handlers or downloader
+- All user-facing strings must use translation keys via `t("key")` — never hardcode text in handlers
+- New translation keys must be added to **both** `src/locales/ru.json` and `src/locales/en.json`

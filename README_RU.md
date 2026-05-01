@@ -33,6 +33,7 @@
 | 🪄 **Inline-режим** | Отправка видео прямо из любого чата: `@имя_бота <ссылка>` |
 | 🎥 **Видео-кружки** | Команда `/round` — конвертация видео в формат Telegram video note |
 | 📊 **Статистика** | Сбор статистики по платформам и пользователям в PostgreSQL |
+| 🌐 **Локализация** | Интерфейс на русском и английском; язык выбирается через `/language` |
 | 🐳 **Docker Compose** | Бот + PostgreSQL поднимаются одной командой |
 | 🍪 **Cookies** | YouTube (видео 18+) и Instagram (закрытые аккаунты) — через Netscape cookies |
 
@@ -71,6 +72,7 @@ DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/downloader_bo
 POSTGRES_PASSWORD=postgres        # Только для Docker Compose
 
 # Опциональные
+DEFAULT_LANGUAGE=ru                      # Язык интерфейса: ru или en (по умолчанию: ru)
 DOWNLOAD_DIR=downloads                   # Директория для загруженных файлов
 YT_COOKIES_FILE=./cookies/youtube.txt    # Cookies для YouTube 18+
 INSTA_COOKIES_FILE=./cookies/instagram.txt  # Cookies для Instagram (закрытые аккаунты)
@@ -89,6 +91,7 @@ INSTA_COOKIES_FILE_HOST_PATH=./cookies/instagram.txt  # Путь к Instagram co
 | `ADMIN_USERS` | ✅ | Telegram user_id администраторов (через запятую) |
 | `DATABASE_URL` | ✅ | Строка подключения к PostgreSQL (async SQLAlchemy) |
 | `POSTGRES_PASSWORD` | Docker | Пароль PostgreSQL для Docker Compose |
+| `DEFAULT_LANGUAGE` | ❌ | Язык интерфейса по умолчанию (`ru` или `en`, по умолчанию `ru`) |
 | `DOWNLOAD_DIR` | ❌ | Директория для файлов (по умолчанию `downloads`) |
 | `YT_COOKIES_FILE` | ❌ | Путь к Netscape cookies-файлу для YouTube |
 | `INSTA_COOKIES_FILE` | ❌ | Путь к Netscape cookies-файлу для Instagram |
@@ -110,10 +113,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Установите зависимости
 uv sync
 
-# 3. Примените миграции базы данных
-uv run alembic upgrade head
-
-# 4. Запустите бота
+# 3. Запустите бота (схема БД создаётся автоматически при первом запуске)
 uv run python -m src.main
 ```
 
@@ -157,6 +157,7 @@ docker compose down
 | `/voice [url]` | Скачать аудио и отправить как голосовое сообщение |
 | `/gif [url]` | Скачать видео и конвертировать в GIF |
 | `/round [url]` | Скачать видео и отправить как кружок (video note) |
+| `/language` | Выбрать язык интерфейса (🇷🇺 Русский / 🇬🇧 English) |
 | `/cache` | Информация о локальном кэше |
 | `/clearcache` | Очистить локальный кэш |
 

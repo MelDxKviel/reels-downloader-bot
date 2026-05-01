@@ -35,6 +35,7 @@
 | 🪄 **Inline mode** | Send videos from any chat: `@bot_name <url>` |
 | 🎥 **Video notes** | `/round` command — converts video to Telegram video note format |
 | 📊 **Statistics** | Per-platform and per-user download stats stored in PostgreSQL |
+| 🌐 **Localization** | Interface in Russian and English; each user picks their language via `/language` |
 | 🐳 **Docker Compose** | Bot + PostgreSQL launched with a single command |
 | 🍪 **Cookies** | YouTube (age-restricted) and Instagram (private accounts) — via Netscape cookies |
 
@@ -73,6 +74,7 @@ DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/downloader_bo
 POSTGRES_PASSWORD=postgres        # Docker Compose only
 
 # Optional
+DEFAULT_LANGUAGE=ru                      # Interface language: ru or en (default: ru)
 DOWNLOAD_DIR=downloads                   # Directory for downloaded files
 YT_COOKIES_FILE=./cookies/youtube.txt    # Cookies for age-restricted YouTube
 INSTA_COOKIES_FILE=./cookies/instagram.txt  # Cookies for Instagram (private accounts)
@@ -91,6 +93,7 @@ INSTA_COOKIES_FILE_HOST_PATH=./cookies/instagram.txt  # Host path to Instagram c
 | `ADMIN_USERS` | ✅ | Telegram user IDs of admins (comma-separated) |
 | `DATABASE_URL` | ✅ | PostgreSQL connection string (async SQLAlchemy) |
 | `POSTGRES_PASSWORD` | Docker | PostgreSQL password for Docker Compose |
+| `DEFAULT_LANGUAGE` | ❌ | Default UI language (`ru` or `en`, default: `ru`) |
 | `DOWNLOAD_DIR` | ❌ | File storage directory (default: `downloads`) |
 | `YT_COOKIES_FILE` | ❌ | Path to Netscape cookies file for YouTube |
 | `INSTA_COOKIES_FILE` | ❌ | Path to Netscape cookies file for Instagram |
@@ -112,10 +115,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Install dependencies
 uv sync
 
-# 3. Apply database migrations
-uv run alembic upgrade head
-
-# 4. Start the bot
+# 3. Start the bot (schema is created automatically on first run)
 uv run python -m src.main
 ```
 
@@ -159,6 +159,7 @@ docker compose down
 | `/voice [url]` | Download audio and send as a Telegram voice message |
 | `/gif [url]` | Download video and convert to a GIF |
 | `/round [url]` | Download video and send as a video note (circle) |
+| `/language` | Choose interface language (🇷🇺 Russian / 🇬🇧 English) |
 | `/cache` | Show local cache info |
 | `/clearcache` | Clear the local cache |
 
