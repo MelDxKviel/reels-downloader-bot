@@ -98,7 +98,7 @@ async def _do_userstats(
     message: Message, db: DatabaseService, bot: Bot, t: Translator, user_id: int
 ) -> None:
     user = await db.get_user(user_id)
-    if not user:
+    if not user and user_id not in ADMIN_USERS:
         await message.answer(t("admin.removeuser.not_found", user_id=user_id))
         return
 
@@ -107,7 +107,7 @@ async def _do_userstats(
 
     created = (
         user.created_at.strftime("%d.%m.%Y %H:%M")
-        if user.created_at
+        if user and user.created_at
         else t("admin.users.date_unknown")
     )
     last_active = stats.get("last_activity")
@@ -208,25 +208,34 @@ async def cmd_users(message: Message, db: DatabaseService, bot: Bot, t: Translat
         return
 
     users = await db.get_all_users()
+    admin_ids = set(ADMIN_USERS)
+    regular_users = [u for u in users if u.user_id not in admin_ids]
 
-    if not users:
+    if not regular_users and not admin_ids:
         await message.answer(t("admin.users.empty"))
         return
 
     lines = [t("admin.users.title") + "\n"]
-    for i, user in enumerate(users, 1):
+    idx = 1
+
+    for admin_id in ADMIN_USERS:
+        full_name, username = await get_user_display_info(bot, admin_id)
+        user_info = format_user_info(admin_id, full_name, username)
+        lines.append(f"{idx}. 👑 {user_info}\n    <i>{t('admin.users.role_admin')}</i>")
+        idx += 1
+
+    for user in regular_users:
         status = "✅" if user.is_active else "❌"
         created = (
             user.created_at.strftime("%d.%m.%Y")
             if user.created_at
             else t("admin.users.date_unknown")
         )
-
         full_name, username = await get_user_display_info(bot, user.user_id)
         user_info = format_user_info(user.user_id, full_name, username)
-
         added_label = t("admin.users.added_at", date=created)
-        lines.append(f"{i}. {status} {user_info}\n    <i>{added_label}</i>")
+        lines.append(f"{idx}. {status} {user_info}\n    <i>{added_label}</i>")
+        idx += 1
 
     await message.answer("\n".join(lines))
 

@@ -119,6 +119,7 @@
   "admin.users.empty": "📝 Список пользователей пуст.",
   "admin.users.title": "👥 <b>Разрешённые пользователи:</b>",
   "admin.users.added_at": "добавлен: {date}",
+  "admin.users.role_admin": "администратор",
   "admin.users.date_unknown": "—",
   "admin.stats.text": "📊 <b>Статистика бота</b>\n\n<b>Всего:</b>\n• Загрузок: {total}\n• Успешных: {success}\n• Неудачных: {failed}\n• Активных пользователей: {active}\n\n<b>За 24 часа:</b>\n• Загрузок: {total_24h}\n• Успешных: {success_24h}\n\n<b>За 7 дней:</b>\n• Загрузок: {total_7d}\n• Успешных: {success_7d}\n\n<b>По платформам (всего):</b>\n",
   "admin.userstats.usage": "📝 <b>Использование:</b>\n<code>/userstats USER_ID</code>\n\nПример: <code>/userstats 123456789</code>",
