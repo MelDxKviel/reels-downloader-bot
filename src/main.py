@@ -92,10 +92,6 @@ async def main() -> None:
     db = DatabaseService()
     await db.init_db()
 
-    # Регистрируем администраторов в таблице пользователей, чтобы их статистика была доступна
-    for admin_id in ADMIN_USERS:
-        await db.add_user(admin_id)
-
     # Создаём бота
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 

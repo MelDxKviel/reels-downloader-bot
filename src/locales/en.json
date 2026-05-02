@@ -119,6 +119,7 @@
   "admin.users.empty": "📝 The user list is empty.",
   "admin.users.title": "👥 <b>Allowed users:</b>",
   "admin.users.added_at": "added: {date}",
+  "admin.users.role_admin": "admin",
   "admin.users.date_unknown": "—",
   "admin.stats.text": "📊 <b>Bot statistics</b>\n\n<b>All time:</b>\n• Downloads: {total}\n• Successful: {success}\n• Failed: {failed}\n• Active users: {active}\n\n<b>Last 24 hours:</b>\n• Downloads: {total_24h}\n• Successful: {success_24h}\n\n<b>Last 7 days:</b>\n• Downloads: {total_7d}\n• Successful: {success_7d}\n\n<b>By platform (all time):</b>\n",
   "admin.userstats.usage": "📝 <b>Usage:</b>\n<code>/userstats USER_ID</code>\n\nExample: <code>/userstats 123456789</code>",
