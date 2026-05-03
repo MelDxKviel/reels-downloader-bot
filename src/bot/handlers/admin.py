@@ -94,13 +94,10 @@ async def _do_removeuser(
         await message.answer(t("admin.removeuser.not_found", user_id=user_id))
 
 
-async def _do_userstats(
-    message: Message, db: DatabaseService, bot: Bot, t: Translator, user_id: int
-) -> None:
+async def _build_userstats_text(db: DatabaseService, bot: Bot, t: Translator, user_id: int) -> str:
     user = await db.get_user(user_id)
     if not user and user_id not in ADMIN_USERS:
-        await message.answer(t("admin.removeuser.not_found", user_id=user_id))
-        return
+        return t("admin.removeuser.not_found", user_id=user_id)
 
     stats = await db.get_user_stats(user_id)
     full_name, username = await get_user_display_info(bot, user_id)
@@ -139,7 +136,23 @@ async def _do_userstats(
     for platform, count in stats.get("by_platform", {}).items():
         text += f"• {platform}: {count}\n"
 
+    return text
+
+
+async def _do_userstats(
+    message: Message, db: DatabaseService, bot: Bot, t: Translator, user_id: int
+) -> None:
+    text = await _build_userstats_text(db, bot, t, user_id)
     await message.answer(text)
+
+
+def _short_user_label(
+    idx: int, full_name: Optional[str], username: Optional[str], user_id: int
+) -> str:
+    name = full_name or (f"@{username}" if username else str(user_id))
+    if len(name) > 24:
+        name = name[:23] + "…"
+    return f"📊 #{idx} {name}"
 
 
 @router.message(Command("adduser"))
@@ -216,12 +229,21 @@ async def cmd_users(message: Message, db: DatabaseService, bot: Bot, t: Translat
         return
 
     lines = [t("admin.users.title") + "\n"]
+    buttons: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
     idx = 1
+
+    def _add_stats_button(label: str, target_id: int) -> None:
+        row.append(InlineKeyboardButton(text=label, callback_data=f"userstats_view:{target_id}"))
+        if len(row) == 2:
+            buttons.append(row.copy())
+            row.clear()
 
     for admin_id in ADMIN_USERS:
         full_name, username = await get_user_display_info(bot, admin_id)
         user_info = format_user_info(admin_id, full_name, username)
         lines.append(f"{idx}. 👑 {user_info}\n    <i>{t('admin.users.role_admin')}</i>")
+        _add_stats_button(_short_user_label(idx, full_name, username, admin_id), admin_id)
         idx += 1
 
     for user in regular_users:
@@ -235,9 +257,14 @@ async def cmd_users(message: Message, db: DatabaseService, bot: Bot, t: Translat
         user_info = format_user_info(user.user_id, full_name, username)
         added_label = t("admin.users.added_at", date=created)
         lines.append(f"{idx}. {status} {user_info}\n    <i>{added_label}</i>")
+        _add_stats_button(_short_user_label(idx, full_name, username, user.user_id), user.user_id)
         idx += 1
 
-    await message.answer("\n".join(lines))
+    if row:
+        buttons.append(row)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+    await message.answer("\n".join(lines), reply_markup=keyboard)
 
 
 @router.message(Command("stats"))
@@ -338,6 +365,30 @@ async def cancel_admin(callback: CallbackQuery, state: FSMContext, t: Translator
 
     await state.clear()
     await callback.message.edit_text(t(cancelled_key))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("userstats_view:"))
+async def cb_userstats_view(
+    callback: CallbackQuery, db: DatabaseService, bot: Bot, t: Translator
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t("common.access_denied_callback"), show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 2:
+        await callback.answer()
+        return
+
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await callback.answer()
+        return
+
+    text = await _build_userstats_text(db, bot, t, target_id)
+    await callback.message.answer(text)
     await callback.answer()
 
 
