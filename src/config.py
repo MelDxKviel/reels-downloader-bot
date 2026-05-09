@@ -50,6 +50,13 @@ YT_COOKIES_FILE: Optional[str] = os.getenv("YT_COOKIES_FILE", None)
 # Экспортируйте cookies из браузера с помощью расширения "Get cookies.txt LOCALLY"
 INSTA_COOKIES_FILE: Optional[str] = os.getenv("INSTA_COOKIES_FILE", None)
 
+# FPS для конвертации в GIF
+_gif_fps_env = os.getenv("GIF_FPS", "30").strip()
+try:
+    GIF_FPS: int = max(1, int(_gif_fps_env))
+except ValueError:
+    GIF_FPS = 30
+
 # ID чата для публикации видео в inline-режиме.
 # Telegram запрещает загружать новые файлы в editMessageMedia с inline_message_id —
 # принимаются только file_id или URL. Бот предварительно выгружает видео в этот чат

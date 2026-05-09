@@ -23,7 +23,7 @@ from aiogram.types import (
     Message,
 )
 
-from src.config import DOWNLOAD_DIR
+from src.config import DOWNLOAD_DIR, GIF_FPS
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
 from src.services.i18n import Translator, translate_download_error
@@ -53,17 +53,14 @@ def _cancel_keyboard(user_id: int, t: Translator) -> InlineKeyboardMarkup:
 
 
 async def _convert_to_gif(input_path: str) -> Optional[str]:
-    """Конвертирует видео в GIF (макс 10с, 480px, 10fps, палитра palettegen/paletteuse)."""
+    """Конвертирует видео в GIF (макс 10с, 480px, palettegen/paletteuse)."""
     if not shutil.which("ffmpeg"):
         return None
 
     output_path = str(Path(DOWNLOAD_DIR) / f"gif_{uuid.uuid4().hex[:8]}.gif")
 
-    # Однопроходная генерация палитры через split — значительно лучше цветопередача
-    # 10 fps: плавно и экономично для соцсетей; 480px ширина — баланс качества и размера;
-    # sierra2_4a — лучший дизеринг для компактных GIF
     vf = (
-        "fps=10,scale=480:-1:flags=lanczos,"
+        f"fps={GIF_FPS},scale=480:-1:flags=lanczos,"
         "split[s0][s1];"
         "[s0]palettegen=max_colors=256:stats_mode=diff[p];"
         "[s1][p]paletteuse=dither=sierra2_4a"
