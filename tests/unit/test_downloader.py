@@ -664,3 +664,117 @@ async def test_download_skips_photo_extraction_when_duration_above_threshold(tmp
 
     mock_extract.assert_not_called()
     assert result.success
+
+
+# ── download: Twitter / X image posts ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_download_twitter_image_via_prepare_filename(tmp_path):
+    """yt-dlp downloading a jpg for a Twitter photo post → returned as is_photo=True."""
+    d = make_downloader(tmp_path)
+    photo = fake_video(tmp_path, "tweet_img.jpg")
+    url = "https://x.com/user/status/123456789"
+
+    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {"title": "Tweet photo", "duration": None}
+        mock_ydl.prepare_filename.return_value = str(photo)
+
+        result = await d.download(url)
+
+    assert result.success
+    assert result.is_photo is True
+    assert result.photo_paths == [str(photo)]
+    assert not result.from_cache
+
+
+@pytest.mark.asyncio
+async def test_download_twitter_image_via_progress_hook(tmp_path):
+    """Image file captured by the progress hook is returned as is_photo=True."""
+    d = make_downloader(tmp_path)
+    photo = fake_video(tmp_path, "hook_img.jpg")
+    url = "https://twitter.com/user/status/111222333"
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self._hooks = opts.get("progress_hooks", [])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, _url, download=True):
+            for hook in self._hooks:
+                hook({"status": "finished", "filename": str(photo)})
+            return {"title": "Hook photo", "duration": None}
+
+        def prepare_filename(self, info):
+            return str(photo)
+
+    with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+        result = await d.download(url)
+
+    assert result.success
+    assert result.is_photo is True
+    assert result.photo_paths == [str(photo)]
+
+
+@pytest.mark.asyncio
+async def test_download_twitter_multi_image_returns_carousel(tmp_path):
+    """Multiple images captured via progress hook → photo carousel."""
+    d = make_downloader(tmp_path)
+    photo1 = fake_video(tmp_path, "tw_1.jpg")
+    photo2 = fake_video(tmp_path, "tw_2.jpg")
+    url = "https://x.com/user/status/999888777"
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self._hooks = opts.get("progress_hooks", [])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, _url, download=True):
+            for hook in self._hooks:
+                hook({"status": "finished", "filename": str(photo1)})
+                hook({"status": "finished", "filename": str(photo2)})
+            return {"title": "Multi-image tweet", "duration": None}
+
+        def prepare_filename(self, info):
+            return str(photo1)
+
+    with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+        result = await d.download(url)
+
+    assert result.success
+    assert result.is_photo is True
+    assert len(result.photo_paths) == 2
+    assert str(photo1) in result.photo_paths
+    assert str(photo2) in result.photo_paths
+
+
+@pytest.mark.asyncio
+async def test_download_twitter_video_not_treated_as_photo(tmp_path):
+    """Twitter video (mp4) must NOT be returned as a photo."""
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path, "tweet_video.mp4")
+    url = "https://x.com/user/status/555444333"
+
+    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {"title": "Tweet video", "duration": 15.0}
+        mock_ydl.prepare_filename.return_value = str(video)
+
+        result = await d.download(url)
+
+    assert result.success
+    assert result.is_photo is False
+    assert result.photo_paths is None

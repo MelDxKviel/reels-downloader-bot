@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_USER_AGENT = "TelegramBot (like TwitterBot)"
 
+_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+
 # Для HTML-запросов используем десктопный браузерный UA: Instagram на UA
 # вида TelegramBot/WhatsApp отдаёт упрощённый link-preview без inline JSON,
 # а именно из JSON берётся полноразмерный display_url каждого слайда.
@@ -800,14 +802,13 @@ class VideoDownloader:
         """Синхронная функция скачивания для запуска в executor."""
 
         def attempt_download(download_url: str, opts: dict) -> DownloadResult:
-            downloaded_file_path = None
+            all_downloaded: list[str] = []
 
             def progress_hook(d):
-                nonlocal downloaded_file_path
                 if d.get("status") == "finished":
                     filename = d.get("filename")
-                    if isinstance(filename, str):
-                        downloaded_file_path = filename
+                    if isinstance(filename, str) and filename not in all_downloaded:
+                        all_downloaded.append(filename)
 
             opts = opts.copy()
             opts["progress_hooks"] = [progress_hook]
@@ -849,6 +850,23 @@ class VideoDownloader:
                 title = info.get("title", "Видео") if isinstance(info, dict) else "Видео"
                 duration = info.get("duration") if isinstance(info, dict) else None
 
+                # Multiple images captured via progress hook → photo carousel
+                existing = [f for f in all_downloaded if os.path.exists(f)]
+                image_files = [
+                    f for f in existing if os.path.splitext(f)[1].lower() in _IMAGE_EXTENSIONS
+                ]
+                if len(image_files) > 1:
+                    return DownloadResult(
+                        success=True,
+                        file_path=image_files[0],
+                        title=title,
+                        duration=duration,
+                        is_photo=True,
+                        photo_paths=image_files[:MAX_CAROUSEL_ITEMS],
+                    )
+
+                downloaded_file_path = existing[-1] if existing else None
+
                 if not downloaded_file_path:
                     try:
                         prepared = ydl.prepare_filename(info)
@@ -863,7 +881,7 @@ class VideoDownloader:
                         and not os.path.exists(downloaded_file_path)
                     ):
                         base = os.path.splitext(downloaded_file_path)[0]
-                        for ext in ["mp4", "webm", "mkv", "mov"]:
+                        for ext in ["mp4", "webm", "mkv", "mov", "jpg", "jpeg", "png", "webp"]:
                             test_path = f"{base}.{ext}"
                             if os.path.exists(test_path):
                                 downloaded_file_path = test_path
@@ -888,8 +906,15 @@ class VideoDownloader:
                             error_code="downloader.error.file_too_large",
                             error_args={"size_mb": size_mb, "max_mb": max_mb},
                         )
+                    file_ext = os.path.splitext(downloaded_file_path)[1].lower()
+                    is_photo = file_ext in _IMAGE_EXTENSIONS
                     return DownloadResult(
-                        success=True, file_path=downloaded_file_path, title=title, duration=duration
+                        success=True,
+                        file_path=downloaded_file_path,
+                        title=title,
+                        duration=duration,
+                        is_photo=is_photo,
+                        photo_paths=[downloaded_file_path] if is_photo else None,
                     )
                 else:
                     outtmpl = opts.get("outtmpl", "")
@@ -902,8 +927,15 @@ class VideoDownloader:
 
                     found_file = self._find_downloaded_file(file_id) if file_id else None
                     if found_file:
+                        file_ext = os.path.splitext(found_file)[1].lower()
+                        is_photo = file_ext in _IMAGE_EXTENSIONS
                         return DownloadResult(
-                            success=True, file_path=found_file, title=title, duration=duration
+                            success=True,
+                            file_path=found_file,
+                            title=title,
+                            duration=duration,
+                            is_photo=is_photo,
+                            photo_paths=[found_file] if is_photo else None,
                         )
                     return DownloadResult(
                         success=False,
@@ -1006,19 +1038,23 @@ class VideoDownloader:
 
     def _find_downloaded_file(self, file_id: str) -> Optional[str]:
         """Находит скачанный файл по ID."""
-        for ext in ["mp4", "webm", "mkv", "mov", "avi"]:
+        for ext in ["mp4", "webm", "mkv", "mov", "avi", "jpg", "jpeg", "png", "webp"]:
             file_path = self.download_dir / f"{file_id}.{ext}"
             if file_path.exists():
                 return str(file_path)
 
         for file in self.download_dir.iterdir():
-            if file.stem.startswith(file_id) and file.suffix in [
+            if file.stem.startswith(file_id) and file.suffix.lower() in {
                 ".mp4",
                 ".webm",
                 ".mkv",
                 ".mov",
                 ".avi",
-            ]:
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".webp",
+            }:
                 return str(file)
 
         return None
