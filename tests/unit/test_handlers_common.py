@@ -26,7 +26,8 @@ async def test_cmd_help_non_admin_no_suffix():
         await common_h.cmd_help(msg, Translator("en"))
     msg.answer.assert_awaited_once()
     text = msg.answer.await_args.args[0]
-    assert "admin" not in text.lower() or "use /adminhelp" not in text.lower()
+    # The admin-only suffix mentions /adminhelp; it must be absent for non-admins.
+    assert "/adminhelp" not in text
 
 
 @pytest.mark.asyncio
