@@ -45,9 +45,15 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Run tests
-        run: uv run pytest tests/ -v --tb=short
+      - name: Run tests with coverage
+        run: uv run pytest tests/ -v --tb=short --cov=src --cov-report=xml --cov-report=term-missing
         env:
           BOT_TOKEN: "0:test"
           ADMIN_USERS: "123456"
           DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false

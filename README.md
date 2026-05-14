@@ -8,6 +8,8 @@
 ![yt-dlp](https://img.shields.io/badge/yt--dlp-latest-red)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-336791?logo=postgresql&logoColor=white)
+[![CI](https://github.com/meldxkviel/reels-downloader-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/meldxkviel/reels-downloader-bot/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/meldxkviel/reels-downloader-bot/branch/main/graph/badge.svg)](https://codecov.io/gh/meldxkviel/reels-downloader-bot)
 
 [🇷🇺 Русская версия](./README_RU.md)
 
