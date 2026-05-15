@@ -61,7 +61,7 @@ from .mp3 import _convert_to_mp3
 # Имя feature-флага в bot_settings, которым админ включает/выключает поиск
 # шортсов в inline-режиме (см. handlers/admin.py: /features).
 FEATURE_SHORTS_SEARCH = "youtube_shorts_search"
-SHORTS_SEARCH_RESULTS = 3
+SHORTS_SEARCH_RESULTS = 10
 
 logger = logging.getLogger(__name__)
 
