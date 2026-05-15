@@ -71,6 +71,21 @@ class UserPreference(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class BotSetting(Base):
+    """Глобальные настройки бота (фича-флаги и т.п.) в виде key/value.
+
+    Используется для динамического включения/отключения экспериментальных фич
+    из админки без рестарта.
+    """
+
+    __tablename__ = "bot_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    value: Mapped[str] = mapped_column(String(255), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class DatabaseService:
     """Сервис для работы с базой данных."""
 
@@ -181,6 +196,37 @@ class DatabaseService:
                 pref.language = language
             await session.commit()
             return True
+
+    # === Глобальные настройки / feature flags ===
+
+    async def get_setting(self, key: str) -> Optional[str]:
+        """Возвращает значение глобальной настройки или None, если ключа нет."""
+        async with self.async_session() as session:
+            result = await session.execute(select(BotSetting).where(BotSetting.key == key))
+            row = result.scalar_one_or_none()
+            return row.value if row else None
+
+    async def set_setting(self, key: str, value: str) -> None:
+        """Сохраняет (или обновляет) значение глобальной настройки."""
+        async with self.async_session() as session:
+            result = await session.execute(select(BotSetting).where(BotSetting.key == key))
+            row = result.scalar_one_or_none()
+            if row is None:
+                session.add(BotSetting(key=key, value=value))
+            else:
+                row.value = value
+            await session.commit()
+
+    async def is_feature_enabled(self, name: str, default: bool = False) -> bool:
+        """Возвращает True, если в bot_settings ключ feature.<name> = "1"."""
+        stored = await self.get_setting(f"feature.{name}")
+        if stored is None:
+            return default
+        return stored == "1"
+
+    async def set_feature_enabled(self, name: str, enabled: bool) -> None:
+        """Сохраняет включение/отключение фичи."""
+        await self.set_setting(f"feature.{name}", "1" if enabled else "0")
 
     # === Статистика ===
 

@@ -548,3 +548,60 @@ async def test_cmd_users_empty_both_admins_and_users():
         with patch("src.bot.handlers.admin.ADMIN_USERS", []):
             await adm.cmd_users(msg, db, bot, Translator("en"))
     msg.answer.assert_awaited()
+
+
+# ── /features command + toggle callback ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cmd_features_non_admin_denied():
+    msg = make_message("/features", user_id=99)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cmd_features(msg, db, Translator("en"))
+    msg.answer.assert_awaited()
+    db.is_feature_enabled.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmd_features_shows_current_state():
+    msg = make_message("/features", user_id=1)
+    db = make_db()
+    db.is_feature_enabled.return_value = False
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cmd_features(msg, db, Translator("en"))
+    msg.answer.assert_awaited()
+    # Keyboard with toggle button is attached.
+    kwargs = msg.answer.await_args.kwargs
+    assert "reply_markup" in kwargs
+    assert kwargs["reply_markup"].inline_keyboard
+
+
+@pytest.mark.asyncio
+async def test_cb_feature_toggle_flips_value():
+    cb = make_callback("feature_toggle:youtube_shorts_search", user_id=1)
+    db = make_db()
+    db.is_feature_enabled.return_value = False
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cb_feature_toggle(cb, db, Translator("en"))
+    db.set_feature_enabled.assert_awaited_with("youtube_shorts_search", True)
+    cb.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cb_feature_toggle_unknown_flag_ignored():
+    cb = make_callback("feature_toggle:unknown_flag", user_id=1)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cb_feature_toggle(cb, db, Translator("en"))
+    db.set_feature_enabled.assert_not_called()
+    cb.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cb_feature_toggle_non_admin_denied():
+    cb = make_callback("feature_toggle:youtube_shorts_search", user_id=99)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cb_feature_toggle(cb, db, Translator("en"))
+    db.set_feature_enabled.assert_not_called()

@@ -215,3 +215,42 @@ async def test_user_language_independent_of_user_table(db_service):
     user = await db_service.get_user(1001)
     assert user is None  # not added to whitelist
     assert await db_service.is_user_allowed(1001) is False
+
+
+# ── bot settings / feature flags ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_setting_returns_none_when_unset(db_service):
+    assert await db_service.get_setting("missing") is None
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_setting(db_service):
+    await db_service.set_setting("foo", "bar")
+    assert await db_service.get_setting("foo") == "bar"
+
+
+@pytest.mark.asyncio
+async def test_set_setting_updates_existing(db_service):
+    await db_service.set_setting("foo", "bar")
+    await db_service.set_setting("foo", "baz")
+    assert await db_service.get_setting("foo") == "baz"
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_default_off(db_service):
+    assert await db_service.is_feature_enabled("nope") is False
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_default_overridable(db_service):
+    assert await db_service.is_feature_enabled("nope", default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_set_feature_enabled_persists(db_service):
+    await db_service.set_feature_enabled("shorts", True)
+    assert await db_service.is_feature_enabled("shorts") is True
+    await db_service.set_feature_enabled("shorts", False)
+    assert await db_service.is_feature_enabled("shorts") is False
