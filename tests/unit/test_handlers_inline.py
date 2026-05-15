@@ -203,6 +203,36 @@ async def test_chosen_inline_shorts_downloads_video(tmp_path):
     bot.edit_message_media.assert_awaited()
 
 
+@pytest.mark.asyncio
+async def test_inline_query_db_flag_lookup_exception_falls_back_to_invalid():
+    q = make_inline_query("funny cats")
+    db = make_db()
+    db.is_feature_enabled = AsyncMock(side_effect=RuntimeError("db down"))
+    await inline_h.inline_query_handler(q, db, Translator("en"))
+    q.answer.assert_awaited()
+    assert q.answer.await_args.kwargs["results"][0].id == "invalid"
+
+
+@pytest.mark.asyncio
+async def test_answer_shorts_search_swallows_search_exception():
+    from src.bot.handlers import inline as ih
+
+    q = make_inline_query("funny cats")
+    with patch.object(ih, "search_shorts", AsyncMock(side_effect=RuntimeError("boom"))):
+        await ih._answer_shorts_search(q, "funny cats", Translator("en"))
+    q.answer.assert_awaited()
+    assert q.answer.await_args.kwargs["results"][0].id == "shorts_empty"
+
+
+@pytest.mark.asyncio
+async def test_chosen_inline_shorts_empty_video_id_edits_error():
+    cr = make_chosen_result("s:", "funny cats")
+    bot = make_bot()
+    db = make_db()
+    await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
+    bot.edit_message_text.assert_awaited()
+
+
 # ── inline_loading_callback ──────────────────────────────────────────────────
 
 

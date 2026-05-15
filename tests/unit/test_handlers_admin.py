@@ -605,3 +605,27 @@ async def test_cb_feature_toggle_non_admin_denied():
     with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
         await adm.cb_feature_toggle(cb, db, Translator("en"))
     db.set_feature_enabled.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cb_feature_toggle_swallows_edit_text_exception():
+    """If Telegram refuses the edit (e.g. message too old), the toggle still completes."""
+    cb = make_callback("feature_toggle:youtube_shorts_search", user_id=1)
+    cb.message.edit_text.side_effect = RuntimeError("edit failed")
+    db = make_db()
+    db.is_feature_enabled.return_value = True
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cb_feature_toggle(cb, db, Translator("en"))
+    db.set_feature_enabled.assert_awaited_with("youtube_shorts_search", False)
+    cb.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cb_feature_toggle_empty_flag_ignored():
+    """callback_data missing the flag name (no colon) is treated as unknown."""
+    cb = make_callback("feature_toggle:", user_id=1)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cb_feature_toggle(cb, db, Translator("en"))
+    db.set_feature_enabled.assert_not_called()
+    cb.answer.assert_awaited()
