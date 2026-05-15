@@ -104,12 +104,19 @@ async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Trans
 
     url = _extract_url(text)
     if url is None:
-        # Если включён фича-флаг — пробуем поиск шортсов по тексту.
+        # Если введённый текст похож на URL (есть схема ://), но мы его не
+        # извлекли — значит, это ссылка на неподдерживаемую платформу. В этом
+        # случае оставляем привычное сообщение "ссылка не распознана" и НЕ
+        # запускаем поиск шортсов: иначе vimeo/reddit-ссылка стала бы
+        # поисковым запросом, что вводит в заблуждение.
+        looks_like_url = "://" in text
+
         shorts_enabled = False
-        try:
-            shorts_enabled = await db.is_feature_enabled(FEATURE_SHORTS_SEARCH)
-        except Exception as e:
-            logger.warning("Не удалось получить флаг %s: %s", FEATURE_SHORTS_SEARCH, e)
+        if not looks_like_url:
+            try:
+                shorts_enabled = await db.is_feature_enabled(FEATURE_SHORTS_SEARCH)
+            except Exception as e:
+                logger.warning("Не удалось получить флаг %s: %s", FEATURE_SHORTS_SEARCH, e)
 
         if shorts_enabled:
             await _answer_shorts_search(query, text, t)

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import BigInteger, Boolean, DateTime, String, Text, and_, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -207,14 +208,29 @@ class DatabaseService:
             return row.value if row else None
 
     async def set_setting(self, key: str, value: str) -> None:
-        """Сохраняет (или обновляет) значение глобальной настройки."""
+        """Сохраняет (или обновляет) значение глобальной настройки.
+
+        ``bot_settings.key`` имеет UNIQUE-индекс, поэтому при гонке двух
+        одновременных INSERT (например, два быстрых клика по /features или
+        одновременные тогглы от разных админов) один из коммитов получит
+        ``IntegrityError``. Ловим его, откатываем сессию и завершаем
+        операцию обновлением — после rollback строка уже точно есть.
+        """
         async with self.async_session() as session:
             result = await session.execute(select(BotSetting).where(BotSetting.key == key))
             row = result.scalar_one_or_none()
             if row is None:
                 session.add(BotSetting(key=key, value=value))
-            else:
-                row.value = value
+                try:
+                    await session.commit()
+                    return
+                except IntegrityError:
+                    await session.rollback()
+                    result = await session.execute(select(BotSetting).where(BotSetting.key == key))
+                    row = result.scalar_one_or_none()
+                    if row is None:
+                        raise
+            row.value = value
             await session.commit()
 
     async def is_feature_enabled(self, name: str, default: bool = False) -> bool:

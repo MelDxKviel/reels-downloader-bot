@@ -204,6 +204,23 @@ async def test_chosen_inline_shorts_downloads_video(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_inline_query_unsupported_url_keeps_invalid_card_even_when_shorts_on():
+    """URL on unsupported host (e.g. vimeo) must not be turned into a search query."""
+    q = make_inline_query("https://vimeo.com/12345")
+    db = make_db()
+    db.is_feature_enabled = AsyncMock(return_value=True)
+    from src.bot.handlers import inline as ih
+
+    with patch.object(ih, "search_shorts", AsyncMock()) as search:
+        await ih.inline_query_handler(q, db, Translator("en"))
+    q.answer.assert_awaited()
+    assert q.answer.await_args.kwargs["results"][0].id == "invalid"
+    search.assert_not_called()
+    # Flag must not even be queried for URL-looking input.
+    db.is_feature_enabled.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_inline_query_db_flag_lookup_exception_falls_back_to_invalid():
     q = make_inline_query("funny cats")
     db = make_db()
