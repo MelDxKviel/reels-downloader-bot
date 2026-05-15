@@ -50,8 +50,18 @@ from src.services.database import DatabaseService
 from src.services.downloader import downloader
 from src.services.i18n import Translator, translate_download_error
 from src.services.url_utils import extract_url, get_url_hash
+from src.services.youtube_search import (
+    build_shorts_url,
+    get_cached_video_file_id,
+    search_shorts,
+)
 
 from .mp3 import _convert_to_mp3
+
+# Имя feature-флага в bot_settings, которым админ включает/выключает поиск
+# шортсов в inline-режиме (см. handlers/admin.py: /features).
+FEATURE_SHORTS_SEARCH = "youtube_shorts_search"
+SHORTS_SEARCH_RESULTS = 3
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +81,7 @@ def _extract_url(text: Optional[str]) -> Optional[str]:
 
 
 @router.inline_query()
-async def inline_query_handler(query: InlineQuery, t: Translator) -> None:
+async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Translator) -> None:
     """Формирует inline-результаты по введённому тексту (видео, кружок, MP3)."""
     text = (query.query or "").strip()
 
@@ -94,6 +104,24 @@ async def inline_query_handler(query: InlineQuery, t: Translator) -> None:
 
     url = _extract_url(text)
     if url is None:
+        # Если введённый текст похож на URL (есть схема ://), но мы его не
+        # извлекли — значит, это ссылка на неподдерживаемую платформу. В этом
+        # случае оставляем привычное сообщение "ссылка не распознана" и НЕ
+        # запускаем поиск шортсов: иначе vimeo/reddit-ссылка стала бы
+        # поисковым запросом, что вводит в заблуждение.
+        looks_like_url = "://" in text
+
+        shorts_enabled = False
+        if not looks_like_url:
+            try:
+                shorts_enabled = await db.is_feature_enabled(FEATURE_SHORTS_SEARCH)
+            except Exception as e:
+                logger.warning("Не удалось получить флаг %s: %s", FEATURE_SHORTS_SEARCH, e)
+
+        if shorts_enabled:
+            await _answer_shorts_search(query, text, t)
+            return
+
         await query.answer(
             results=[
                 InlineQueryResultArticle(
@@ -181,6 +209,78 @@ async def inline_query_handler(query: InlineQuery, t: Translator) -> None:
     await query.answer(results=results, cache_time=1, is_personal=True)
 
 
+async def _answer_shorts_search(query: InlineQuery, text: str, t: Translator) -> None:
+    """Ищет 3 YouTube Shorts по тексту и формирует inline-результаты."""
+    try:
+        shorts = await search_shorts(text, count=SHORTS_SEARCH_RESULTS)
+    except Exception as e:
+        logger.warning("Shorts search exception for %r: %s", text, e)
+        shorts = []
+
+    if not shorts:
+        await query.answer(
+            results=[
+                InlineQueryResultArticle(
+                    id="shorts_empty",
+                    title=t("inline.shorts.empty_title"),
+                    description=t("inline.shorts.empty_description"),
+                    input_message_content=InputTextMessageContent(
+                        message_text=t("inline.shorts.empty_message")
+                    ),
+                )
+            ],
+            cache_time=10,
+            is_personal=True,
+        )
+        return
+
+    results = []
+    for item in shorts:
+        description_parts = []
+        if item.channel:
+            description_parts.append(item.channel)
+        if item.duration is not None:
+            description_parts.append(_format_duration(item.duration))
+        description = " · ".join(description_parts) or t("inline.shorts.default_description")
+
+        cached_file_id = get_cached_video_file_id(item.video_id)
+        if cached_file_id:
+            results.append(
+                InlineQueryResultCachedVideo(
+                    id=f"sc:{item.video_id}",
+                    video_file_id=cached_file_id,
+                    title=item.title,
+                    description=description,
+                )
+            )
+            continue
+
+        results.append(
+            InlineQueryResultArticle(
+                id=f"s:{item.video_id}",
+                title=item.title,
+                description=description,
+                thumbnail_url=item.thumbnail,
+                input_message_content=InputTextMessageContent(
+                    message_text=t(
+                        "inline.shorts.download_status",
+                        title=html.escape(item.title),
+                    ),
+                    parse_mode="HTML",
+                ),
+                reply_markup=_loading_keyboard(t),
+            )
+        )
+
+    await query.answer(results=results, cache_time=30, is_personal=True)
+
+
+def _format_duration(seconds: float) -> str:
+    total = int(seconds)
+    m, s = divmod(total, 60)
+    return f"{m}:{s:02d}"
+
+
 @router.callback_query(F.data == "inline_loading")
 async def inline_loading_callback(callback: CallbackQuery, t: Translator) -> None:
     """Тык по placeholder-кнопке во время загрузки."""
@@ -193,6 +293,19 @@ async def chosen_inline_handler(
 ) -> None:
     """Докачивает медиа и заменяет текстовую заглушку на видео, кружок или MP3."""
     result_id = chosen.result_id or ""
+
+    # Быстрый путь для кэшированного шортса: URL восстанавливается из video_id.
+    if result_id.startswith("sc:"):
+        video_id = result_id[len("sc:") :]
+        if video_id:
+            shorts_url = build_shorts_url(video_id)
+            await db.record_download(
+                user_id=chosen.from_user.id,
+                platform=downloader.get_platform_name(shorts_url),
+                url=shorts_url,
+                success=True,
+            )
+        return
 
     # Быстрый путь (cached:*, cached_photo:*, cached_mp3:*) — только статистика.
     for prefix in ("cached:", "cached_photo:", "cached_mp3:"):
@@ -209,7 +322,7 @@ async def chosen_inline_handler(
 
     # Определяем тип операции по префиксу result_id.
     operation: Optional[str] = None
-    for prefix in ("download:", "mp3:"):
+    for prefix in ("download:", "mp3:", "s:"):
         if result_id.startswith(prefix):
             operation = prefix.rstrip(":")
             break
@@ -224,10 +337,19 @@ async def chosen_inline_handler(
         )
         return
 
-    url = _extract_url(chosen.query)
-    if url is None:
-        await _safe_edit_text(bot, inline_message_id, t("inline.invalid_message"))
-        return
+    # Для шортсов URL не приходит в chosen.query (там пользовательский поисковой
+    # запрос). Восстанавливаем URL из video_id, закодированного в result_id.
+    if operation == "s":
+        video_id = result_id[len("s:") :]
+        if not video_id:
+            await _safe_edit_text(bot, inline_message_id, t("inline.error.generic"))
+            return
+        url = build_shorts_url(video_id)
+    else:
+        url = _extract_url(chosen.query)
+        if url is None:
+            await _safe_edit_text(bot, inline_message_id, t("inline.invalid_message"))
+            return
 
     platform = downloader.get_platform_name(url)
     user_id = chosen.from_user.id
@@ -247,7 +369,7 @@ async def chosen_inline_handler(
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
-    if operation == "download":
+    if operation == "download" or operation == "s":
         if result.is_photo:
             # В inline Telegram не умеет редактировать сообщение в media group,
             # поэтому для карусели отправляется только первый слайд.

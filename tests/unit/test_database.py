@@ -215,3 +215,103 @@ async def test_user_language_independent_of_user_table(db_service):
     user = await db_service.get_user(1001)
     assert user is None  # not added to whitelist
     assert await db_service.is_user_allowed(1001) is False
+
+
+# ── bot settings / feature flags ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_setting_returns_none_when_unset(db_service):
+    assert await db_service.get_setting("missing") is None
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_setting(db_service):
+    await db_service.set_setting("foo", "bar")
+    assert await db_service.get_setting("foo") == "bar"
+
+
+@pytest.mark.asyncio
+async def test_set_setting_updates_existing(db_service):
+    await db_service.set_setting("foo", "bar")
+    await db_service.set_setting("foo", "baz")
+    assert await db_service.get_setting("foo") == "baz"
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_default_off(db_service):
+    assert await db_service.is_feature_enabled("nope") is False
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_default_overridable(db_service):
+    assert await db_service.is_feature_enabled("nope", default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_set_feature_enabled_persists(db_service):
+    await db_service.set_feature_enabled("shorts", True)
+    assert await db_service.is_feature_enabled("shorts") is True
+    await db_service.set_feature_enabled("shorts", False)
+    assert await db_service.is_feature_enabled("shorts") is False
+
+
+@pytest.mark.asyncio
+async def test_set_setting_recovers_from_concurrent_insert_race(db_service, monkeypatch):
+    """Simulate a concurrent writer inserting the row between our SELECT and
+    COMMIT. The UNIQUE constraint on key would normally fail the commit with
+    IntegrityError; set_setting must catch it, rollback, and fall through to
+    an UPDATE so the toggle still succeeds.
+    """
+    from src.services.database import BotSetting
+
+    real_session_factory = db_service.async_session
+    sneaked = {"done": False}
+
+    def factory_with_sneak():
+        sess = real_session_factory()
+        real_execute = sess.execute
+
+        async def patched_execute(stmt, *args, **kwargs):
+            result = await real_execute(stmt, *args, **kwargs)
+            if not sneaked["done"]:
+                sneaked["done"] = True
+                # Insert the row via another session right before set_setting
+                # adds its own row → guaranteed unique-constraint clash at commit.
+                async with real_session_factory() as other:
+                    other.add(BotSetting(key="raced", value="from_other"))
+                    await other.commit()
+            return result
+
+        sess.execute = patched_execute
+        return sess
+
+    monkeypatch.setattr(db_service, "async_session", factory_with_sneak)
+    await db_service.set_setting("raced", "mine")
+    monkeypatch.setattr(db_service, "async_session", real_session_factory)
+
+    # The UPDATE-after-rollback path won — our value must be present.
+    assert await db_service.get_setting("raced") == "mine"
+
+
+@pytest.mark.asyncio
+async def test_set_setting_reraises_if_row_vanishes_after_rollback(db_service, monkeypatch):
+    """Edge case: IntegrityError fires but the row is gone on re-select.
+    Nothing sensible to do — re-raise so the caller sees the failure.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    real_session_factory = db_service.async_session
+
+    def factory_with_fake_commit():
+        sess = real_session_factory()
+
+        async def fake_commit():
+            raise IntegrityError("statement", {}, Exception("UNIQUE"))
+
+        sess.commit = fake_commit
+        return sess
+
+    monkeypatch.setattr(db_service, "async_session", factory_with_fake_commit)
+    with pytest.raises(IntegrityError):
+        await db_service.set_setting("ghost", "value")

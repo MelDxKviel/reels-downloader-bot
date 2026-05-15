@@ -38,14 +38,14 @@ def make_chosen_result(
 @pytest.mark.asyncio
 async def test_inline_query_empty_text_returns_hint():
     q = make_inline_query("")
-    await inline_h.inline_query_handler(q, Translator("en"))
+    await inline_h.inline_query_handler(q, make_db(), Translator("en"))
     q.answer.assert_awaited()
 
 
 @pytest.mark.asyncio
 async def test_inline_query_invalid_url():
     q = make_inline_query("not a link")
-    await inline_h.inline_query_handler(q, Translator("en"))
+    await inline_h.inline_query_handler(q, make_db(), Translator("en"))
     q.answer.assert_awaited()
 
 
@@ -55,7 +55,7 @@ async def test_inline_query_url_no_cache():
     with patch.object(inline_h.downloader, "get_cached_media_type", return_value=None):
         with patch.object(inline_h.downloader, "get_telegram_file_id", return_value=None):
             with patch.object(inline_h.downloader, "get_telegram_mp3_file_id", return_value=None):
-                await inline_h.inline_query_handler(q, Translator("en"))
+                await inline_h.inline_query_handler(q, make_db(), Translator("en"))
     q.answer.assert_awaited()
 
 
@@ -65,7 +65,7 @@ async def test_inline_query_url_cached_video():
     with patch.object(inline_h.downloader, "get_cached_media_type", return_value="video"):
         with patch.object(inline_h.downloader, "get_telegram_file_id", return_value="vid_fid"):
             with patch.object(inline_h.downloader, "get_telegram_mp3_file_id", return_value=None):
-                await inline_h.inline_query_handler(q, Translator("en"))
+                await inline_h.inline_query_handler(q, make_db(), Translator("en"))
     q.answer.assert_awaited()
 
 
@@ -75,7 +75,7 @@ async def test_inline_query_url_cached_photo():
     with patch.object(inline_h.downloader, "get_cached_media_type", return_value="photo"):
         with patch.object(inline_h.downloader, "get_telegram_photo_file_id", return_value="ph"):
             with patch.object(inline_h.downloader, "get_telegram_mp3_file_id", return_value=None):
-                await inline_h.inline_query_handler(q, Translator("en"))
+                await inline_h.inline_query_handler(q, make_db(), Translator("en"))
     q.answer.assert_awaited()
 
 
@@ -85,7 +85,169 @@ async def test_inline_query_url_cached_mp3():
     with patch.object(inline_h.downloader, "get_cached_media_type", return_value=None):
         with patch.object(inline_h.downloader, "get_telegram_file_id", return_value=None):
             with patch.object(inline_h.downloader, "get_telegram_mp3_file_id", return_value="m"):
-                await inline_h.inline_query_handler(q, Translator("en"))
+                await inline_h.inline_query_handler(q, make_db(), Translator("en"))
+
+
+# ── shorts search (feature-flagged) ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_inline_query_text_shorts_disabled_returns_invalid():
+    q = make_inline_query("funny cats")
+    db = make_db()
+    db.is_feature_enabled = AsyncMock(return_value=False)
+    await inline_h.inline_query_handler(q, db, Translator("en"))
+    q.answer.assert_awaited()
+    # When disabled the existing "invalid_title" article is used (id="invalid").
+    call_kwargs = q.answer.await_args.kwargs
+    assert call_kwargs["results"][0].id == "invalid"
+
+
+@pytest.mark.asyncio
+async def test_inline_query_text_shorts_enabled_no_results():
+    q = make_inline_query("funny cats")
+    db = make_db()
+    db.is_feature_enabled = AsyncMock(return_value=True)
+    from src.bot.handlers import inline as ih
+
+    with patch.object(ih, "search_shorts", AsyncMock(return_value=[])):
+        await ih.inline_query_handler(q, db, Translator("en"))
+    q.answer.assert_awaited()
+    assert q.answer.await_args.kwargs["results"][0].id == "shorts_empty"
+
+
+@pytest.mark.asyncio
+async def test_inline_query_text_shorts_enabled_returns_results():
+    from src.bot.handlers import inline as ih
+    from src.services.youtube_search import ShortsSearchResult
+
+    q = make_inline_query("funny cats")
+    db = make_db()
+    db.is_feature_enabled = AsyncMock(return_value=True)
+
+    hits = [
+        ShortsSearchResult(
+            video_id="abc123",
+            title="Cat 1",
+            url="https://www.youtube.com/shorts/abc123",
+            thumbnail="https://i.ytimg.com/vi/abc123/hqdefault.jpg",
+            duration=15.0,
+            channel="Cats",
+        ),
+        ShortsSearchResult(
+            video_id="def456",
+            title="Cat 2",
+            url="https://www.youtube.com/shorts/def456",
+            thumbnail=None,
+            duration=None,
+            channel=None,
+        ),
+    ]
+    with patch.object(ih, "search_shorts", AsyncMock(return_value=hits)):
+        with patch.object(ih, "get_cached_video_file_id", return_value=None):
+            await ih.inline_query_handler(q, db, Translator("en"))
+    q.answer.assert_awaited()
+    result_ids = [r.id for r in q.answer.await_args.kwargs["results"]]
+    assert result_ids == ["s:abc123", "s:def456"]
+
+
+@pytest.mark.asyncio
+async def test_inline_query_text_shorts_uses_cached_file_id():
+    from src.bot.handlers import inline as ih
+    from src.services.youtube_search import ShortsSearchResult
+
+    q = make_inline_query("funny cats")
+    db = make_db()
+    db.is_feature_enabled = AsyncMock(return_value=True)
+
+    hits = [
+        ShortsSearchResult(
+            video_id="abc123",
+            title="Cat 1",
+            url="https://www.youtube.com/shorts/abc123",
+            thumbnail="https://i.ytimg.com/vi/abc123/hqdefault.jpg",
+            duration=15.0,
+            channel=None,
+        ),
+    ]
+    with patch.object(ih, "search_shorts", AsyncMock(return_value=hits)):
+        with patch.object(ih, "get_cached_video_file_id", return_value="cached_fid"):
+            await ih.inline_query_handler(q, db, Translator("en"))
+    result = q.answer.await_args.kwargs["results"][0]
+    assert result.id == "sc:abc123"
+
+
+@pytest.mark.asyncio
+async def test_chosen_inline_shorts_cached_records_stats():
+    cr = make_chosen_result("sc:abc123", "funny cats")
+    bot = make_bot()
+    db = make_db()
+    await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
+    db.record_download.assert_awaited()
+    call_kwargs = db.record_download.await_args.kwargs
+    assert call_kwargs["url"] == "https://www.youtube.com/shorts/abc123"
+    assert call_kwargs["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_chosen_inline_shorts_downloads_video(tmp_path):
+    cr = make_chosen_result("s:abc123", "funny cats")
+    bot = make_bot()
+    db = make_db()
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    result = DownloadResult(success=True, file_path=str(video))
+    with patch.object(inline_h.downloader, "download", AsyncMock(return_value=result)):
+        with patch.object(inline_h, "_upload_video_and_get_file_id", AsyncMock(return_value="fid")):
+            await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
+    bot.edit_message_media.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inline_query_unsupported_url_keeps_invalid_card_even_when_shorts_on():
+    """URL on unsupported host (e.g. vimeo) must not be turned into a search query."""
+    q = make_inline_query("https://vimeo.com/12345")
+    db = make_db()
+    db.is_feature_enabled = AsyncMock(return_value=True)
+    from src.bot.handlers import inline as ih
+
+    with patch.object(ih, "search_shorts", AsyncMock()) as search:
+        await ih.inline_query_handler(q, db, Translator("en"))
+    q.answer.assert_awaited()
+    assert q.answer.await_args.kwargs["results"][0].id == "invalid"
+    search.assert_not_called()
+    # Flag must not even be queried for URL-looking input.
+    db.is_feature_enabled.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_inline_query_db_flag_lookup_exception_falls_back_to_invalid():
+    q = make_inline_query("funny cats")
+    db = make_db()
+    db.is_feature_enabled = AsyncMock(side_effect=RuntimeError("db down"))
+    await inline_h.inline_query_handler(q, db, Translator("en"))
+    q.answer.assert_awaited()
+    assert q.answer.await_args.kwargs["results"][0].id == "invalid"
+
+
+@pytest.mark.asyncio
+async def test_answer_shorts_search_swallows_search_exception():
+    from src.bot.handlers import inline as ih
+
+    q = make_inline_query("funny cats")
+    with patch.object(ih, "search_shorts", AsyncMock(side_effect=RuntimeError("boom"))):
+        await ih._answer_shorts_search(q, "funny cats", Translator("en"))
+    q.answer.assert_awaited()
+    assert q.answer.await_args.kwargs["results"][0].id == "shorts_empty"
+
+
+@pytest.mark.asyncio
+async def test_chosen_inline_shorts_empty_video_id_edits_error():
+    cr = make_chosen_result("s:", "funny cats")
+    bot = make_bot()
+    db = make_db()
+    await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
+    bot.edit_message_text.assert_awaited()
 
 
 # ── inline_loading_callback ──────────────────────────────────────────────────

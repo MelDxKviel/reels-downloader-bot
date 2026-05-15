@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+# Перечень фича-флагов, доступных в /features. Хранятся в bot_settings под
+# ключом feature.<name>. При добавлении флага не забудьте локализовать его имя
+# через ключ "admin.features.flag.<name>".
+FEATURE_FLAGS: tuple[str, ...] = ("youtube_shorts_search",)
+
 
 class AdminStates(StatesGroup):
     waiting_for_user_id = State()
@@ -338,6 +343,67 @@ async def cmd_adminhelp(message: Message, t: Translator) -> None:
         return
 
     await message.answer(t("admin.adminhelp.text"))
+
+
+async def _build_features_view(
+    db: DatabaseService, t: Translator
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Собирает текст и клавиатуру для /features (текущее состояние флагов)."""
+    lines = [t("admin.features.title"), ""]
+    buttons: list[list[InlineKeyboardButton]] = []
+    for flag in FEATURE_FLAGS:
+        enabled = await db.is_feature_enabled(flag)
+        flag_label = t(f"admin.features.flag.{flag}")
+        state_label = t("admin.features.state_on" if enabled else "admin.features.state_off")
+        lines.append(f"• <b>{flag_label}</b>: {state_label}")
+        action_key = "admin.features.button_disable" if enabled else "admin.features.button_enable"
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=t(action_key, name=flag_label),
+                    callback_data=f"feature_toggle:{flag}",
+                )
+            ]
+        )
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.message(Command("features"))
+async def cmd_features(message: Message, db: DatabaseService, t: Translator) -> None:
+    """Показывает текущее состояние фича-флагов и позволяет переключать их."""
+    if not is_admin(message.from_user.id):
+        await message.answer(t("admin.only"))
+        return
+
+    text, keyboard = await _build_features_view(db, t)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("feature_toggle:"))
+async def cb_feature_toggle(callback: CallbackQuery, db: DatabaseService, t: Translator) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t("common.access_denied_callback"), show_alert=True)
+        return
+
+    parts = callback.data.split(":", 1)
+    flag = parts[1] if len(parts) > 1 else ""
+    if flag not in FEATURE_FLAGS:
+        await callback.answer()
+        return
+
+    current = await db.is_feature_enabled(flag)
+    await db.set_feature_enabled(flag, not current)
+
+    text, keyboard = await _build_features_view(db, t)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception as e:
+        logger.debug("Не удалось обновить /features сообщение: %s", e)
+
+    new_state = t("admin.features.state_on" if not current else "admin.features.state_off")
+    await callback.answer(
+        t("admin.features.toggle_ack", name=t(f"admin.features.flag.{flag}"), state=new_state)
+    )
 
 
 @router.callback_query(F.data.startswith("cancel_admin:"))
