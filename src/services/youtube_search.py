@@ -29,9 +29,11 @@ SHORTS_MAX_DURATION_SECONDS = 65
 
 # yt-dlp по поисковому URL ``ytsearchN:`` отдаёт максимум N entries. Берём
 # заметно больше, чем выводим, чтобы после фильтрации по длительности всё-таки
-# набрать 3 шортса.
-SEARCH_FETCH_MULTIPLIER = 6
-MAX_SEARCH_FETCH = 25
+# набрать нужное количество шортсов. Telegram inline-мод принимает до 50
+# результатов; нам столько не нужно, но потолок выдачи > запрашиваемого, чтобы
+# фильтр по длительности не оставил пустые слоты.
+SEARCH_FETCH_MULTIPLIER = 4
+MAX_SEARCH_FETCH = 50
 MIN_QUERY_LENGTH = 2
 
 
