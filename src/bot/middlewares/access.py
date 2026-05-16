@@ -57,6 +57,9 @@ class UserAccessMiddleware(BaseMiddleware):
     Middleware для проверки доступа пользователя.
     Пропускает только пользователей из базы данных или администраторов.
     Применяется к Message, InlineQuery и ChosenInlineResult.
+
+    Если белый список выключен через /features, пускаем всех — администраторы
+    всё равно проходят по короткому пути выше.
     """
 
     def __init__(self, db: DatabaseService):
@@ -77,6 +80,11 @@ class UserAccessMiddleware(BaseMiddleware):
 
         # Администраторы всегда имеют доступ
         if user.id in ADMIN_USERS:
+            return await handler(event, data)
+
+        # Белый список можно отключить из админки — тогда бот открыт всем.
+        whitelist_enabled = await self.db.is_feature_enabled("whitelist", default=True)
+        if not whitelist_enabled:
             return await handler(event, data)
 
         # Проверяем, есть ли пользователь в базе данных
