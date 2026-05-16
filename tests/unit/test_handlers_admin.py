@@ -629,3 +629,34 @@ async def test_cb_feature_toggle_empty_flag_ignored():
         await adm.cb_feature_toggle(cb, db, Translator("en"))
     db.set_feature_enabled.assert_not_called()
     cb.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_whitelist_flag_registered_with_default_true():
+    """The whitelist flag is part of FEATURE_FLAGS and defaults to enabled."""
+    assert "whitelist" in adm.FEATURE_FLAG_NAMES
+    assert adm.FEATURE_FLAG_DEFAULTS["whitelist"] is True
+
+
+@pytest.mark.asyncio
+async def test_cmd_features_uses_whitelist_default_when_unset():
+    """If the whitelist setting has never been written, /features must read it as ON."""
+    msg = make_message("/features", user_id=1)
+    db = make_db()
+    # Simulate "never toggled" by echoing the default kwarg back to caller.
+    db.is_feature_enabled.side_effect = lambda name, default=False: default
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cmd_features(msg, db, Translator("en"))
+    db.is_feature_enabled.assert_any_await("whitelist", default=True)
+
+
+@pytest.mark.asyncio
+async def test_cb_feature_toggle_whitelist_off_when_default_on():
+    """Toggling the whitelist from the default ON state writes a disabled value."""
+    cb = make_callback("feature_toggle:whitelist", user_id=1)
+    db = make_db()
+    db.is_feature_enabled.side_effect = lambda name, default=False: default
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cb_feature_toggle(cb, db, Translator("en"))
+    db.set_feature_enabled.assert_awaited_with("whitelist", False)
+    cb.answer.assert_awaited()

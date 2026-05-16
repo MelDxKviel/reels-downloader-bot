@@ -145,6 +145,7 @@
   "admin.features.button_disable": "Выключить «{name}»",
   "admin.features.toggle_ack": "{name}: {state}",
   "admin.features.flag.youtube_shorts_search": "Поиск YouTube Shorts по тексту (inline)",
+  "admin.features.flag.whitelist": "Белый список пользователей",
   "menu.start": "Запустить бота",
   "menu.help": "Справка по использованию",
   "menu.download": "Скачать видео по URL",

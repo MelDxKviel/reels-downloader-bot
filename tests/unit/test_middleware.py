@@ -44,6 +44,7 @@ def handler():
 def mock_db():
     db = MagicMock()
     db.get_user = AsyncMock(return_value=None)
+    db.is_feature_enabled = AsyncMock(return_value=True)
     return db
 
 
@@ -181,6 +182,34 @@ async def test_denied_message_does_not_call_answer(handler, mock_db):
         await middleware(handler, msg, {})
 
     msg.answer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_whitelist_disabled_allows_unknown_user(handler, mock_db):
+    """When the whitelist flag is off, non-admins must pass without DB lookup."""
+    mock_db.is_feature_enabled = AsyncMock(return_value=False)
+    middleware = UserAccessMiddleware(mock_db)
+
+    with patch("src.bot.middlewares.access.ADMIN_USERS", []):
+        await middleware(handler, make_message(424242), {})
+
+    handler.assert_called_once()
+    mock_db.is_feature_enabled.assert_awaited_with("whitelist", default=True)
+    mock_db.get_user.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_whitelist_disabled_still_blocks_eventless_user(handler, mock_db):
+    """Even with whitelist off, events without a user are dropped."""
+    mock_db.is_feature_enabled = AsyncMock(return_value=False)
+    middleware = UserAccessMiddleware(mock_db)
+    event = MagicMock()
+    event.from_user = None
+
+    result = await middleware(handler, event, {})
+
+    handler.assert_not_called()
+    assert result is None
 
 
 @pytest.mark.asyncio

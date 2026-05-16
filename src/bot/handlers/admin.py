@@ -27,8 +27,14 @@ router = Router()
 
 # Перечень фича-флагов, доступных в /features. Хранятся в bot_settings под
 # ключом feature.<name>. При добавлении флага не забудьте локализовать его имя
-# через ключ "admin.features.flag.<name>".
-FEATURE_FLAGS: tuple[str, ...] = ("youtube_shorts_search",)
+# через ключ "admin.features.flag.<name>". Второе значение — дефолт, если
+# флаг ни разу не переключали (например, белый список включён по умолчанию).
+FEATURE_FLAGS: tuple[tuple[str, bool], ...] = (
+    ("youtube_shorts_search", False),
+    ("whitelist", True),
+)
+FEATURE_FLAG_NAMES: frozenset[str] = frozenset(name for name, _ in FEATURE_FLAGS)
+FEATURE_FLAG_DEFAULTS: dict[str, bool] = {name: default for name, default in FEATURE_FLAGS}
 
 
 class AdminStates(StatesGroup):
@@ -351,8 +357,8 @@ async def _build_features_view(
     """Собирает текст и клавиатуру для /features (текущее состояние флагов)."""
     lines = [t("admin.features.title"), ""]
     buttons: list[list[InlineKeyboardButton]] = []
-    for flag in FEATURE_FLAGS:
-        enabled = await db.is_feature_enabled(flag)
+    for flag, default in FEATURE_FLAGS:
+        enabled = await db.is_feature_enabled(flag, default=default)
         flag_label = t(f"admin.features.flag.{flag}")
         state_label = t("admin.features.state_on" if enabled else "admin.features.state_off")
         lines.append(f"• <b>{flag_label}</b>: {state_label}")
@@ -387,11 +393,11 @@ async def cb_feature_toggle(callback: CallbackQuery, db: DatabaseService, t: Tra
 
     parts = callback.data.split(":", 1)
     flag = parts[1] if len(parts) > 1 else ""
-    if flag not in FEATURE_FLAGS:
+    if flag not in FEATURE_FLAG_NAMES:
         await callback.answer()
         return
 
-    current = await db.is_feature_enabled(flag)
+    current = await db.is_feature_enabled(flag, default=FEATURE_FLAG_DEFAULTS[flag])
     await db.set_feature_enabled(flag, not current)
 
     text, keyboard = await _build_features_view(db, t)

@@ -145,6 +145,7 @@
   "admin.features.button_disable": "Disable “{name}”",
   "admin.features.toggle_ack": "{name}: {state}",
   "admin.features.flag.youtube_shorts_search": "YouTube Shorts text search (inline)",
+  "admin.features.flag.whitelist": "User whitelist",
   "menu.start": "Start the bot",
   "menu.help": "Usage help",
   "menu.download": "Download a video by URL",
