@@ -5,6 +5,7 @@
 
 import asyncio
 import html as html_lib
+import http.cookiejar
 import json
 import logging
 import os
@@ -334,6 +335,18 @@ class VideoDownloader:
             return None
         return INSTA_COOKIES_FILE
 
+    def _load_instagram_cookie_jar(self) -> Optional[http.cookiejar.MozillaCookieJar]:
+        cookiefile = self._get_instagram_cookiefile()
+        if not cookiefile:
+            return None
+        jar = http.cookiejar.MozillaCookieJar()
+        try:
+            jar.load(cookiefile, ignore_discard=True, ignore_expires=True)
+            return jar
+        except Exception as e:
+            logger.warning("Не удалось загрузить Instagram cookies для HTML-скрапинга: %s", e)
+            return None
+
     def _fetch_instagram_media_info(self, url: str) -> Optional[dict]:
         """
         Запрашивает Instagram-пост и собирает список изображений (для поддержки
@@ -344,6 +357,7 @@ class VideoDownloader:
         или None, если ничего полезного не удалось извлечь.
         """
         shortcode = self._extract_ig_shortcode(url)
+        cookie_jar = self._load_instagram_cookie_jar()
 
         candidates: list[str] = []
         if shortcode:
@@ -360,7 +374,7 @@ class VideoDownloader:
         title: Optional[str] = None
 
         for candidate in candidates:
-            html = self._http_get_html(candidate)
+            html = self._http_get_html(candidate, cookie_jar=cookie_jar)
             if not html:
                 continue
 
@@ -401,7 +415,10 @@ class VideoDownloader:
         return m.group(1) if m else None
 
     @staticmethod
-    def _http_get_html(candidate: str) -> Optional[str]:
+    def _http_get_html(
+        candidate: str,
+        cookie_jar: Optional[http.cookiejar.CookieJar] = None,
+    ) -> Optional[str]:
         try:
             req = urllib.request.Request(
                 candidate,
@@ -413,7 +430,14 @@ class VideoDownloader:
                     "Accept-Language": "en-US,en;q=0.9",
                 },
             )
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            if cookie_jar is not None:
+                opener = urllib.request.build_opener(
+                    urllib.request.HTTPCookieProcessor(cookie_jar)
+                )
+                ctx = opener.open(req, timeout=15)
+            else:
+                ctx = urllib.request.urlopen(req, timeout=15)
+            with ctx as resp:
                 content_type = (resp.headers.get("Content-Type") or "").lower()
                 if "html" not in content_type:
                     return None
