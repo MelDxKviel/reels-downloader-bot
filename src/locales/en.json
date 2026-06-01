@@ -173,5 +173,6 @@
   "downloader.error.auth_required": "Authentication required to view this video",
   "downloader.error.download_failed": "Download error: {message}",
   "downloader.error.unexpected": "Unexpected error: {message}",
-  "downloader.error.download_exception": "Error while downloading: {message}"
+  "downloader.error.download_exception": "Error while downloading: {message}",
+  "downloader.error.instagram_photo_no_media": "Could not download Instagram photo. Instagram requires authentication to access photos. Set up INSTA_COOKIES_FILE to enable photo downloads."
 }

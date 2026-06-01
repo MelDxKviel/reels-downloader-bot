@@ -1018,7 +1018,7 @@ def test_fetch_instagram_media_info_breaks_on_video_marker(tmp_path):
     html_with_video = '<meta property="og:video" content="https://cdn.example/v.mp4">'
     call_count = 0
 
-    def fake_get(_):
+    def fake_get(_, **kwargs):
         nonlocal call_count
         call_count += 1
         return html_with_video

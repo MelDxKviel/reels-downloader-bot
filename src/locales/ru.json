@@ -173,5 +173,6 @@
   "downloader.error.auth_required": "Требуется авторизация для просмотра этого видео",
   "downloader.error.download_failed": "Ошибка скачивания: {message}",
   "downloader.error.unexpected": "Неожиданная ошибка: {message}",
-  "downloader.error.download_exception": "Ошибка при скачивании: {message}"
+  "downloader.error.download_exception": "Ошибка при скачивании: {message}",
+  "downloader.error.instagram_photo_no_media": "Не удалось скачать фото из Instagram. Instagram закрыл доступ к фото без авторизации. Для загрузки настройте INSTA_COOKIES_FILE."
 }
