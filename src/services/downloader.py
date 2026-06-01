@@ -1019,7 +1019,7 @@ class VideoDownloader:
                     error="Требуется авторизация для просмотра этого видео",
                     error_code="downloader.error.auth_required",
                 )
-            elif "there is no video in this post" in error_msg_lower:
+            elif "there is no video in this post" in error_msg_lower and is_instagram_url(url):
                 return DownloadResult(
                     success=False,
                     error="Не удалось скачать Instagram фото-пост: требуется авторизация Instagram",
