@@ -431,9 +431,7 @@ class VideoDownloader:
                 },
             )
             if cookie_jar is not None:
-                opener = urllib.request.build_opener(
-                    urllib.request.HTTPCookieProcessor(cookie_jar)
-                )
+                opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
                 ctx = opener.open(req, timeout=15)
             else:
                 ctx = urllib.request.urlopen(req, timeout=15)
