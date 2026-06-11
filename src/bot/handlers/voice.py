@@ -160,7 +160,7 @@ async def _download_and_send_voice(
         )
         return
 
-    if not result.success:
+    if not result.success or not result.file_path:
         reason = html.escape(translate_download_error(t, result))
         await status_msg.edit_text(t("voice.failed", reason=reason))
         await db.record_download(
