@@ -156,7 +156,10 @@ def is_youtube_url(url: str) -> bool:
 
 
 def is_instagram_url(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
     return host == "instagram.com" or host.endswith(".instagram.com")
 
 
@@ -181,7 +184,10 @@ def is_instagram_photo_candidate_url(url: str) -> bool:
 
 
 def is_kkinstagram_url(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
     return host == "kkinstagram.com" or host.endswith(".kkinstagram.com")
 
 

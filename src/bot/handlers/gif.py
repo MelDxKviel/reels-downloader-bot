@@ -164,7 +164,7 @@ async def _download_and_send_gif(
         )
         return
 
-    if not result.success:
+    if not result.success or not result.file_path:
         reason = html.escape(translate_download_error(t, result))
         await status_msg.edit_text(t("gif.failed", reason=reason))
         await db.record_download(

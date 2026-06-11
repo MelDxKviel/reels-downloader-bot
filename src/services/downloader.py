@@ -17,7 +17,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -173,7 +173,7 @@ class VideoDownloader:
             url_hash = get_url_hash(url)
             entry = self.cache.get(url_hash, {})
             telegram_file_id = entry.get("telegram_file_id")
-            new_entry = {
+            new_entry: Dict[str, Any] = {
                 "file_path": result.file_path,
                 "title": result.title,
                 "duration": result.duration,
@@ -494,9 +494,9 @@ class VideoDownloader:
         # inline JSON присутствуют `"video_url":"..."` и/или `"is_video":true`.
         # Поэтому этих маркеров хватает, чтобы не принять видео за фото.
         if not video_url:
-            m = re.search(r'"video_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
-            if m:
-                video_url = cls._decode_json_str(m.group(1))
+            video_match = re.search(r'"video_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+            if video_match:
+                video_url = cls._decode_json_str(video_match.group(1))
         has_video_marker = bool(video_url) or bool(re.search(r'"is_video"\s*:\s*true', html))
 
         title_contents = list(cls._find_meta_contents(html, "og:title"))

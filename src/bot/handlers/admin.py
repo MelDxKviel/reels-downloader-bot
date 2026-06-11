@@ -2,6 +2,7 @@
 Команды администратора: управление пользователями и статистика.
 """
 
+import html
 import logging
 from datetime import timedelta
 from typing import Optional, Tuple
@@ -55,9 +56,9 @@ def format_user_info(user_id: int, full_name: Optional[str], username: Optional[
     """Форматирует информацию о пользователе для отображения."""
     parts = [f"<code>{user_id}</code>"]
     if full_name:
-        parts.append(f"({full_name})")
+        parts.append(f"({html.escape(full_name)})")
     if username:
-        parts.append(f"@{username}")
+        parts.append(f"@{html.escape(username)}")
     return " ".join(parts)
 
 
@@ -125,9 +126,9 @@ async def _build_userstats_text(db: DatabaseService, bot: Bot, t: Translator, us
 
     user_info_lines = [t("admin.userstats.id", user_id=user_id)]
     if full_name:
-        user_info_lines.append(t("admin.userstats.name", name=full_name))
+        user_info_lines.append(t("admin.userstats.name", name=html.escape(full_name)))
     if username:
-        user_info_lines.append(t("admin.userstats.username", username=username))
+        user_info_lines.append(t("admin.userstats.username", username=html.escape(username)))
     user_info_lines.append(t("admin.userstats.added", date=created))
     user_info_lines.append(t("admin.userstats.last_active", date=last_active_str))
 
@@ -415,7 +416,11 @@ async def cb_feature_toggle(callback: CallbackQuery, db: DatabaseService, t: Tra
 @router.callback_query(F.data.startswith("cancel_admin:"))
 async def cancel_admin(callback: CallbackQuery, state: FSMContext, t: Translator) -> None:
     parts = callback.data.split(":")
-    owner_id = int(parts[1])
+    try:
+        owner_id = int(parts[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
     btn_action = parts[2] if len(parts) > 2 else ""
 
     if callback.from_user.id != owner_id:
