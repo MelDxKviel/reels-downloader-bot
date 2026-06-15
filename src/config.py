@@ -50,12 +50,40 @@ YT_COOKIES_FILE: Optional[str] = os.getenv("YT_COOKIES_FILE", None)
 # Экспортируйте cookies из браузера с помощью расширения "Get cookies.txt LOCALLY"
 INSTA_COOKIES_FILE: Optional[str] = os.getenv("INSTA_COOKIES_FILE", None)
 
-# FPS для конвертации в GIF
+# Параметры сборки GIF.
+#
+# Telegram отображает беззвучный H.264 mp4 как зацикленную GIF-анимацию
+# (sendAnimation), но такой файл в разы легче и плавнее настоящего .gif при
+# сопоставимом качестве. Поэтому "GIF" собирается как компактный mp4, а эти
+# параметры управляют его плавностью, размером и весом.
+
+# Частота кадров GIF-анимации.
 _gif_fps_env = os.getenv("GIF_FPS", "30").strip()
 try:
     GIF_FPS: int = max(1, int(_gif_fps_env))
 except ValueError:
     GIF_FPS = 30
+
+# Максимальная длительность GIF-анимации (секунды); видео обрезается до неё.
+_gif_max_duration_env = os.getenv("GIF_MAX_DURATION", "15").strip()
+try:
+    GIF_MAX_DURATION: int = max(1, int(_gif_max_duration_env))
+except ValueError:
+    GIF_MAX_DURATION = 15
+
+# Максимальная длинная сторона кадра (пиксели); видео не апскейлится.
+_gif_max_size_env = os.getenv("GIF_MAX_SIZE", "640").strip()
+try:
+    GIF_MAX_SIZE: int = max(16, int(_gif_max_size_env))
+except ValueError:
+    GIF_MAX_SIZE = 640
+
+# Качество H.264 (CRF): меньше — лучше и тяжелее. Разумный диапазон ~18–32.
+_gif_crf_env = os.getenv("GIF_CRF", "28").strip()
+try:
+    GIF_CRF: int = min(51, max(0, int(_gif_crf_env)))
+except ValueError:
+    GIF_CRF = 28
 
 # ID чата для публикации видео в inline-режиме.
 # Telegram запрещает загружать новые файлы в editMessageMedia с inline_message_id —

@@ -23,7 +23,14 @@ from aiogram.types import (
     Message,
 )
 
-from src.config import DOWNLOAD_DIR, GIF_FPS
+from src.config import (
+    DOWNLOAD_DIR,
+    GIF_CRF,
+    GIF_FPS,
+    GIF_MAX_DURATION,
+    GIF_MAX_SIZE,
+    MAX_FILE_SIZE,
+)
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
 from src.services.i18n import Translator, translate_download_error
@@ -32,8 +39,6 @@ from src.services.url_utils import extract_url
 logger = logging.getLogger(__name__)
 
 router = Router()
-
-MAX_GIF_DURATION = 10
 
 
 class GifStates(StatesGroup):
@@ -52,53 +57,108 @@ def _cancel_keyboard(user_id: int, t: Translator) -> InlineKeyboardMarkup:
     )
 
 
-async def _convert_to_gif(input_path: str) -> Optional[str]:
-    """Конвертирует видео в GIF (макс 10с, 480px, palettegen/paletteuse)."""
-    if not shutil.which("ffmpeg"):
-        return None
+def _gif_video_filter(fps: int, max_size: int) -> str:
+    """Filtergraph: cap fps, fit the long side into ``max_size`` (no upscale), even dims.
 
-    output_path = str(Path(DOWNLOAD_DIR) / f"gif_{uuid.uuid4().hex[:8]}.gif")
-
-    vf = (
-        f"fps={GIF_FPS},scale=480:-1:flags=lanczos,"
-        "split[s0][s1];"
-        "[s0]palettegen=max_colors=256:stats_mode=diff[p];"
-        "[s1][p]paletteuse=dither=sierra2_4a"
+    The single quotes around each scale expression protect the inner commas from the
+    filtergraph parser. The trailing ``trunc(.../2)*2`` pass guarantees even width and
+    height, which ``yuv420p`` H.264 requires.
+    """
+    return (
+        f"fps={fps},"
+        f"scale=w='min(iw,{max_size})':h='min(ih,{max_size})':"
+        "force_original_aspect_ratio=decrease:flags=lanczos,"
+        "scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2'"
     )
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        input_path,
-        "-t",
-        str(MAX_GIF_DURATION),
-        "-vf",
-        vf,
-        output_path,
-    ]
 
+async def _run_ffmpeg(cmd: list[str], timeout: int = 180) -> Optional[int]:
+    """Run an ffmpeg command, returning its exit code (or None on timeout)."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(proc.wait(), timeout=120)
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         try:
             proc.kill()
         except Exception:
             pass
         return None
+    return proc.returncode
 
-    if proc.returncode == 0 and os.path.exists(output_path):
-        return output_path
-    if os.path.exists(output_path):
+
+def _remove_quietly(path: str) -> None:
+    if os.path.exists(path):
         try:
-            os.remove(output_path)
+            os.remove(path)
         except Exception:
             pass
+
+
+async def _convert_to_gif(input_path: str) -> Optional[str]:
+    """Build a compact, smooth looping animation (silent H.264 mp4).
+
+    Telegram renders a soundless H.264 mp4 as a GIF (``sendAnimation``), but it is
+    far lighter and smoother than a real palette-based ``.gif`` — which lets us keep
+    a high frame rate without the file ballooning. The long side is capped at
+    ``GIF_MAX_SIZE``, the duration at ``GIF_MAX_DURATION`` and the frame rate at
+    ``GIF_FPS``. If the first pass still exceeds Telegram's upload limit, it is
+    re-encoded progressively smaller until it fits.
+    """
+    if not shutil.which("ffmpeg"):
+        return None
+
+    output_path = str(Path(DOWNLOAD_DIR) / f"gif_{uuid.uuid4().hex[:8]}.mp4")
+
+    # (fps, max_size, crf): best quality first, falling back to smaller/cheaper
+    # encodes only if the result overshoots Telegram's size limit.
+    attempts = [
+        (GIF_FPS, GIF_MAX_SIZE, GIF_CRF),
+        (min(GIF_FPS, 20), min(GIF_MAX_SIZE, 480), min(51, GIF_CRF + 6)),
+        (min(GIF_FPS, 15), min(GIF_MAX_SIZE, 360), min(51, GIF_CRF + 10)),
+    ]
+
+    for fps, max_size, crf in attempts:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_path,
+            "-t",
+            str(GIF_MAX_DURATION),
+            "-an",
+            "-vf",
+            _gif_video_filter(fps, max_size),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "main",
+            "-preset",
+            "veryfast",
+            "-crf",
+            str(crf),
+            "-movflags",
+            "+faststart",
+            output_path,
+        ]
+
+        returncode = await _run_ffmpeg(cmd)
+
+        if returncode != 0 or not os.path.exists(output_path):
+            _remove_quietly(output_path)
+            return None
+
+        if os.path.getsize(output_path) <= MAX_FILE_SIZE:
+            return output_path
+
+        # Too heavy for Telegram — drop quality and retry.
+        _remove_quietly(output_path)
+
     return None
 
 
@@ -191,7 +251,7 @@ async def cmd_gif(message: Message, state: FSMContext, db: DatabaseService, t: T
         return
 
     prompt = await message.answer(
-        t("gif.prompt"),
+        t("gif.prompt", duration=GIF_MAX_DURATION, size=GIF_MAX_SIZE, fps=GIF_FPS),
         reply_markup=_cancel_keyboard(message.from_user.id, t),
     )
     await state.set_state(GifStates.waiting_for_input)
