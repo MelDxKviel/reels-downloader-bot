@@ -60,6 +60,8 @@ Schema is auto-created on startup via `Base.metadata.create_all()` — no migrat
 
 **Instagram photo handling**: yt-dlp downloads Instagram photo posts as 0-second videos. The bot detects this, extracts the first frame via FFmpeg, and sends it as a photo. Carousels are limited to 10 items (`MAX_CAROUSEL_ITEMS`). Auth failures trigger a retry via the `kkinstagram.com` mirror.
 
+**GIF output as silent mp4**: `/gif` does not emit a real palette-based `.gif`. Telegram renders a soundless H.264 mp4 as an autoplaying looped animation (`sendAnimation`), and that mp4 is far lighter and smoother than an equivalent GIF — sidestepping the GIF format's frames-vs-size tradeoff. `_convert_to_gif` caps the long side at `GIF_MAX_SIZE` (no upscale, even dimensions for yuv420p), the duration at `GIF_MAX_DURATION` and the frame rate at `GIF_FPS`, encoding with libx264 + CRF `GIF_CRF`. If a pass still exceeds `MAX_FILE_SIZE`, it re-encodes progressively smaller until it fits. The result is sent via `answer_animation`.
+
 **Inline mode**: The bot supports inline queries (`@bot <url>`). Results are returned as cached file_ids when available, or as placeholder Article results with a loading keyboard. On selection (`chosen_inline_result`), the video/photo/MP3 is downloaded, uploaded to `VIDEO_STORAGE_CHAT_ID` (falls back to `ADMIN_USERS[0]`), and the inline message is edited with the real media. The reply_markup (keyboard) must be present on the placeholder for Telegram to send `inline_message_id`. BotFather inline feedback must be set to 100% for `chosen_inline_result` to fire.
 
 **i18n / localization**: The bot supports Russian and English. Translation strings live in `src/locales/ru.json` and `src/locales/en.json` and are loaded once at import time by `src/locales/__init__.py` into the `LOCALE_MESSAGES` dict. `src/services/i18n.py` exposes `get_text(key, lang)` and the `Translator` class (a callable bound to one language). `LocaleMiddleware` injects a `Translator` instance as `t` into every handler's `data`, so handlers call `t("key")` without threading language state themselves. Users select their language via `/language`; the preference is stored in `UserPreference` and takes priority over the Telegram client's `language_code`. Supported languages are declared in `SUPPORTED_LANGUAGES` (`config.py`); the default is `DEFAULT_LANGUAGE` (env var, falls back to `"ru"`). Adding a new language requires a new JSON file and an entry in `SUPPORTED_LANGUAGES`. Command menus are registered per-language at startup via `BotCommandScopeAllPrivateChats(language_code=...)` and updated per-admin chat when they switch language.
@@ -78,7 +80,7 @@ src/
 │   │   ├── download.py        — URL catch-all handler (regex detection, photo/video upload)
 │   │   ├── download_cmd.py    — /download command with FSM waiting state
 │   │   ├── round.py           — /round: FFmpeg crop+scale to 512×512 video note (max 60s)
-│   │   ├── gif.py             — /gif: FFmpeg palettegen+paletteuse GIF (max 10s, 480px, 10fps)
+│   │   ├── gif.py             — /gif: FFmpeg → compact silent H.264 mp4 sent as a Telegram animation (configurable duration/size/fps, size-guard re-encode)
 │   │   ├── mp3.py             — /mp3: FFmpeg libmp3lame audio extraction (VBR q=2)
 │   │   ├── voice.py           — /voice: FFmpeg libopus OGG voice message (64kbps, 48kHz, mono)
 │   │   ├── inline.py          — Inline-mode handler: cached results, storage-chat upload flow
@@ -118,6 +120,10 @@ Schema is created automatically on startup; Alembic is installed but not configu
 | `YT_COOKIES_FILE` | No | Netscape-format cookies for age-restricted YouTube |
 | `INSTA_COOKIES_FILE` | No | Netscape-format cookies for Instagram (private accounts, auth errors) |
 | `VIDEO_STORAGE_CHAT_ID` | No | Chat for inline-mode file uploads; fallback: `ADMIN_USERS[0]` |
+| `GIF_FPS` | No | `/gif` frame rate (default `30`) |
+| `GIF_MAX_DURATION` | No | `/gif` max duration in seconds (default `15`) |
+| `GIF_MAX_SIZE` | No | `/gif` max long-side resolution in px (default `640`) |
+| `GIF_CRF` | No | `/gif` H.264 quality; lower = better/heavier (default `28`) |
 | `POSTGRES_PASSWORD` | Docker only | Default: `postgres` |
 | `YT_COOKIES_FILE_HOST_PATH` | Docker only | Host path mounted into container |
 | `INSTA_COOKIES_FILE_HOST_PATH` | Docker only | Host path mounted into container |

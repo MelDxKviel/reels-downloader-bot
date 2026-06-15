@@ -66,7 +66,7 @@
   "round.send_error": "❌ <b>Send error</b>\n\nTry again later.",
   "round.upload_video_status": "⏳ Uploading video...",
   "round.upload_failed": "❌ <b>Failed to upload file</b>",
-  "gif.prompt": "🎞 Send a video link or an mp4 file.\n\n⏱ The video will be trimmed to <b>10 seconds</b>\n📐 Size: 480px · 10 fps · optimized palette",
+  "gif.prompt": "🎞 Send a video link or an mp4 file.\n\n⏱ The video will be trimmed to <b>{duration}s</b>\n📐 Up to {size}px · {fps} fps · smooth and compact",
   "gif.cancelled": "❌ GIF creation cancelled.",
   "gif.url_not_found": "🤔 No link found. Send a video link or press ❌ to cancel.",
   "gif.not_video": "⚠️ This is not a video file. Send an mp4 or a video link.",
