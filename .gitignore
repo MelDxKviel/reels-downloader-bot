@@ -36,6 +36,7 @@ ENV/
 .env
 .env.local
 .env.*.local
+.env.sync
 
 # Downloads directory content (but keep directory)
 downloads/*
@@ -66,4 +67,7 @@ uv.lock
 .DS_Store
 Thumbs.db
 
+# Cookies + sync-script outputs (secrets — never commit)
 cookies.txt
+instagram-cookies.txt
+cookie-sync-preview/

@@ -12,9 +12,11 @@ services:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/downloader_bot
       - DOWNLOAD_DIR=/app/downloads
       - YT_COOKIES_FILE=${YT_COOKIES_FILE:-}
+      - INSTA_COOKIES_FILE=${INSTA_COOKIES_FILE:-}
     volumes:
       - ./downloads:/app/downloads
       - ${YT_COOKIES_FILE_HOST_PATH:-./cookies.txt}:/app/cookies.txt:ro
+      - ${INSTA_COOKIES_FILE_HOST_PATH:-./instagram-cookies.txt}:/app/instagram-cookies.txt:ro
     networks:
       - bot-network
 
