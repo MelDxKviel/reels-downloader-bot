@@ -10,6 +10,7 @@ import pytest
 
 from src.bot.handlers.download import _build_slideshow_html
 from src.services.downloader import CarouselSlide, DownloadResult, VideoDownloader
+from src.services.url_utils import is_twitter_url
 
 # ── _try_instagram_photo: carousel slide URLs ─────────────────────────────────
 
@@ -415,3 +416,62 @@ async def test_download_instagram_carousel_harvests_video_slides(tmp_path: Path)
     assert result.title == "My mixed carousel"
     # A concrete local file remains as the album/video fallback.
     assert result.file_path == str(first_file)
+
+
+# ── X/Twitter carousels ───────────────────────────────────────────────────────
+
+
+def test_is_twitter_url():
+    assert is_twitter_url("https://x.com/u/status/1")
+    assert is_twitter_url("https://twitter.com/u/status/1")
+    assert is_twitter_url("https://mobile.twitter.com/u/status/1")
+    assert not is_twitter_url("https://www.instagram.com/p/A/")
+    assert not is_twitter_url("https://example.com/")
+
+
+@pytest.mark.asyncio
+async def test_download_twitter_carousel_harvests_slides(tmp_path: Path):
+    """A multi-media X/Twitter post yields a native carousel (carousel_slides) built
+    from the public twimg URLs — no cookies required."""
+    d = VideoDownloader(str(tmp_path))
+    d.has_ffmpeg = False
+    url = "https://x.com/user/status/123456"
+    first = tmp_path / "first.jpg"
+    first.write_bytes(b"x" * 2048)
+    info = {
+        "title": "A tweet",
+        "entries": [
+            {
+                "ext": "jpg",
+                "vcodec": "none",
+                "formats": [{"url": "https://pbs.twimg.com/media/1.jpg", "width": 1200}],
+            },
+            {
+                "ext": "mp4",
+                "duration": 6,
+                "vcodec": "h264",
+                "acodec": "aac",
+                "formats": [
+                    {
+                        "url": "https://video.twimg.com/2.mp4",
+                        "vcodec": "h264",
+                        "acodec": "aac",
+                        "height": 720,
+                    }
+                ],
+            },
+        ],
+    }
+    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = info
+        mock_ydl.prepare_filename.return_value = str(first)
+        res = await d.download(url)
+
+    assert res.success
+    assert res.carousel_slides is not None
+    assert [(s.url, s.is_video) for s in res.carousel_slides] == [
+        ("https://pbs.twimg.com/media/1.jpg", False),
+        ("https://video.twimg.com/2.mp4", True),
+    ]
