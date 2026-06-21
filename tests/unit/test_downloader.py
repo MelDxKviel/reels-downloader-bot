@@ -676,7 +676,10 @@ async def test_download_twitter_image_via_prepare_filename(tmp_path):
     photo = fake_video(tmp_path, "tweet_img.jpg")
     url = "https://x.com/user/status/123456789"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with (
+        patch.object(d, "_fetch_twitter_media", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+    ):
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {"title": "Tweet photo", "duration": None}
@@ -715,7 +718,10 @@ async def test_download_twitter_image_via_progress_hook(tmp_path):
         def prepare_filename(self, info):
             return str(photo)
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+    with (
+        patch.object(d, "_fetch_twitter_media", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL),
+    ):
         result = await d.download(url)
 
     assert result.success
@@ -750,7 +756,10 @@ async def test_download_twitter_multi_image_returns_carousel(tmp_path):
         def prepare_filename(self, info):
             return str(photo1)
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+    with (
+        patch.object(d, "_fetch_twitter_media", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL),
+    ):
         result = await d.download(url)
 
     assert result.success
@@ -767,7 +776,10 @@ async def test_download_twitter_video_not_treated_as_photo(tmp_path):
     video = fake_video(tmp_path, "tweet_video.mp4")
     url = "https://x.com/user/status/555444333"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with (
+        patch.object(d, "_fetch_twitter_media", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+    ):
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {"title": "Tweet video", "duration": 15.0}
