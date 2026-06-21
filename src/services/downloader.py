@@ -831,6 +831,9 @@ class VideoDownloader:
                 duration=result.duration,
                 is_photo=True,
                 photo_paths=[output_path],
+                # Сохраняем слайды карусели: rich-карусель ещё будет отправлена, а
+                # локальный фолбэк теперь валидное фото, а не 0-секундное видео.
+                carousel_slides=result.carousel_slides,
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning("Frame extraction failed: %s", e)
@@ -863,16 +866,11 @@ class VideoDownloader:
 
         try:
             result = await loop.run_in_executor(None, lambda: self._download_sync(url, ydl_opts))
-            if (
-                result.success
-                and is_instagram_photo_candidate_url(url)
-                and result.file_path
-                # У карусели первый слайд может быть коротким видео — извлекать из
-                # него кадр нельзя, иначе потеряем остальные слайды (carousel_slides).
-                and not result.carousel_slides
-            ):
+            if result.success and is_instagram_photo_candidate_url(url) and result.file_path:
                 # Extract frame for photo posts (yt-dlp downloads them as 0-second videos).
                 # Also attempt for None duration — missing metadata on a /p/ post likely means photo.
+                # Для карусели кадр тоже извлекаем (фолбэк-фото должно быть валидным);
+                # carousel_slides переносится в результат, так что rich-карусель отправится.
                 if result.duration is None or result.duration <= 1.0:
                     frame_result = await loop.run_in_executor(
                         None, lambda: self._extract_photo_frame(result)

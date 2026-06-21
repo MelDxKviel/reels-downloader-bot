@@ -5,7 +5,7 @@ description = "Telegram bot for downloading videos from various platforms"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "aiogram>=3.15.0",
+    "aiogram>=3.29.0",
     "yt-dlp>=2024.12.13",
     "python-dotenv>=1.0.0",
     "sqlalchemy[asyncio]>=2.0.0",

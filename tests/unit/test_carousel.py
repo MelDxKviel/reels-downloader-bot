@@ -200,6 +200,43 @@ def test_best_entry_media_url_image_picks_largest():
     assert VideoDownloader._best_entry_media_url(entry, want_video=False) == "https://cdn/large.jpg"
 
 
+def test_extract_photo_frame_preserves_carousel_slides(tmp_path: Path):
+    """Frame extraction (0s-video → photo) must keep carousel_slides so the rich
+    carousel is still attempted and the local fallback is a valid photo."""
+    d = VideoDownloader(str(tmp_path))
+    d.has_ffmpeg = True
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x" * 2048)
+    slides = [
+        CarouselSlide(url="https://cdn/1.jpg"),
+        CarouselSlide(url="https://cdn/2.mp4", is_video=True),
+    ]
+    incoming = DownloadResult(
+        success=True,
+        file_path=str(video),
+        title="T",
+        duration=0.0,
+        is_photo=False,
+        carousel_slides=slides,
+    )
+    frame_path = str(tmp_path / "v_photo.jpg")
+
+    def fake_ffmpeg(cmd, capture_output=True, timeout=30):
+        with open(frame_path, "wb") as f:
+            f.write(b"y" * 4096)
+        proc = MagicMock()
+        proc.returncode = 0
+        return proc
+
+    with patch("src.services.downloader.subprocess.run", side_effect=fake_ffmpeg):
+        result = d._extract_photo_frame(incoming)
+
+    assert result is not None
+    assert result.is_photo is True
+    assert result.photo_paths == [frame_path]
+    assert result.carousel_slides == slides
+
+
 @pytest.mark.asyncio
 async def test_download_instagram_carousel_harvests_video_slides(tmp_path: Path):
     """A mixed Instagram carousel yields ordered carousel_slides (video + photo)."""
