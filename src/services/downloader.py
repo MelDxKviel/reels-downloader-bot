@@ -30,6 +30,7 @@ from src.services.url_utils import (
     get_url_hash,
     is_instagram_photo_candidate_url,
     is_instagram_url,
+    is_kkinstagram_url,
     is_supported_url,
     is_youtube_url,
     should_retry_with_kkinstagram,
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_USER_AGENT = "TelegramBot (like TwitterBot)"
 
 _IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".mkv", ".m4v"})
 
 # Для HTML-запросов используем десктопный браузерный UA: Instagram на UA
 # вида TelegramBot/WhatsApp отдаёт упрощённый link-preview без inline JSON,
@@ -69,6 +71,20 @@ def _is_instagram_cdn_host(hostname: Optional[str]) -> bool:
 
 
 @dataclass
+class CarouselSlide:
+    """Слайд карусели Instagram для нативной rich-карусели (Bot API 10.1).
+
+    Rich-сообщения (``sendRichMessage`` / ``<tg-slideshow>``) принимают медиа
+    ТОЛЬКО как публичные http(s) URL — file_id и multipart-загрузка не
+    поддерживаются. Поэтому слайд хранит исходный URL ассета Instagram CDN
+    (его и подставит Telegram), а не локальный путь к файлу.
+    """
+
+    url: str
+    is_video: bool = False
+
+
+@dataclass
 class DownloadResult:
     """Результат скачивания видео.
 
@@ -88,6 +104,10 @@ class DownloadResult:
     from_cache: bool = False
     is_photo: bool = False
     photo_paths: Optional[list] = None
+    # Упорядоченные слайды карусели Instagram как публичные URL — для отправки
+    # нативной rich-карусели (<tg-slideshow>). photo_paths при этом остаётся
+    # локальным фолбэком (альбом), если rich-сообщение отправить не удалось.
+    carousel_slides: Optional[list] = None
 
 
 class VideoDownloader:
@@ -146,6 +166,9 @@ class VideoDownloader:
                         duration=cached.get("duration"),
                         is_photo=True,
                         photo_paths=existing,
+                        carousel_slides=self._deserialize_carousel_slides(
+                            cached.get("carousel_slides")
+                        ),
                         from_cache=True,
                     )
                 del self.cache[url_hash]
@@ -160,12 +183,32 @@ class VideoDownloader:
                     duration=cached.get("duration"),
                     is_photo=is_photo,
                     photo_paths=[file_path] if is_photo else None,
+                    carousel_slides=self._deserialize_carousel_slides(
+                        cached.get("carousel_slides")
+                    ),
                     from_cache=True,
                 )
             else:
                 del self.cache[url_hash]
                 self._save_cache()
         return None
+
+    @staticmethod
+    def _deserialize_carousel_slides(raw: object) -> Optional[list]:
+        """Восстанавливает список ``CarouselSlide`` из кэша (URL слайдов карусели).
+
+        Возвращает ``None``, если слайдов нет или их меньше двух — нативная
+        rich-карусель (<tg-slideshow>) имеет смысл только для ≥2 элементов.
+        """
+        if not isinstance(raw, list):
+            return None
+        slides: list[CarouselSlide] = []
+        for item in raw:
+            if isinstance(item, dict):
+                url = item.get("url")
+                if isinstance(url, str) and url:
+                    slides.append(CarouselSlide(url=url, is_video=bool(item.get("is_video"))))
+        return slides if len(slides) >= 2 else None
 
     def add_to_cache(self, url: str, result: DownloadResult) -> None:
         """Добавляет результат в кэш."""
@@ -182,6 +225,10 @@ class VideoDownloader:
                 new_entry["is_photo"] = True
                 paths = result.photo_paths or [result.file_path]
                 new_entry["photo_paths"] = list(paths)
+            if result.carousel_slides:
+                new_entry["carousel_slides"] = [
+                    {"url": s.url, "is_video": bool(s.is_video)} for s in result.carousel_slides
+                ]
             if telegram_file_id:
                 new_entry["telegram_file_id"] = telegram_file_id
             self.cache[url_hash] = new_entry
@@ -550,6 +597,91 @@ class VideoDownloader:
         if value and value not in target:
             target.append(value)
 
+    @staticmethod
+    def _supports_carousel(url: str) -> bool:
+        """Платформы, чей пост может быть каруселью из нескольких медиа.
+
+        Пока только Instagram (включая зеркало kkinstagram). У X/Twitter
+        мульти-фото уходит привычным альбомом, карусель для него не собираем.
+        """
+        return is_instagram_url(url) or is_kkinstagram_url(url)
+
+    @staticmethod
+    def _best_entry_media_url(entry: dict, want_video: bool) -> Optional[str]:
+        """Выбирает прямой http(s) URL медиа из yt-dlp entry.
+
+        Для видео предпочитает прогрессивный (audio+video) формат наибольшего
+        качества, для фото — самый крупный графический формат. Это нужно потому,
+        что rich-сообщение (<tg-slideshow>) скачивает медиа ТОЛЬКО по URL —
+        отдаём ссылку, а не локальный файл.
+        """
+
+        def is_http(value: object) -> bool:
+            return isinstance(value, str) and value.startswith("http")
+
+        best_url: Optional[str] = None
+        best_score = -1.0
+        formats = entry.get("formats")
+        if isinstance(formats, list):
+            for fmt in formats:
+                if not isinstance(fmt, dict) or not is_http(fmt.get("url")):
+                    continue
+                vcodec = fmt.get("vcodec")
+                acodec = fmt.get("acodec")
+                has_video = vcodec is not None and vcodec != "none"
+                has_audio = acodec is not None and acodec != "none"
+                if want_video:
+                    if not has_video:
+                        continue
+                    # Прогрессивные (со звуком) форматы — вперёд, дальше по высоте.
+                    score = (1_000_000.0 if has_audio else 0.0) + float(fmt.get("height") or 0)
+                else:
+                    if has_video:
+                        continue
+                    score = float(fmt.get("width") or fmt.get("height") or 0)
+                if score > best_score:
+                    best_score = score
+                    best_url = fmt["url"]
+        if best_url:
+            return best_url
+
+        downloads = entry.get("requested_downloads")
+        if isinstance(downloads, list):
+            for item in downloads:
+                if isinstance(item, dict) and is_http(item.get("url")):
+                    return item["url"]
+        for key in ("url", "display_url"):
+            if is_http(entry.get(key)):
+                return entry[key]
+        thumbnails = entry.get("thumbnails")
+        if isinstance(thumbnails, list):
+            for thumb in reversed(thumbnails):
+                if isinstance(thumb, dict) and is_http(thumb.get("url")):
+                    return thumb["url"]
+        return None
+
+    @classmethod
+    def _entry_to_slide(cls, entry: dict) -> Optional[CarouselSlide]:
+        """Превращает один yt-dlp entry карусели в ``CarouselSlide`` (URL + тип).
+
+        Тип слайда определяется по кодекам / длительности / расширению; URL —
+        через :meth:`_best_entry_media_url`. Возвращает ``None``, если ссылку
+        извлечь не удалось — такой слайд просто пропускается.
+        """
+        if not isinstance(entry, dict):
+            return None
+        ext = str(entry.get("ext") or "").lower()
+        vcodec = entry.get("vcodec")
+        is_video = (
+            (vcodec is not None and vcodec != "none")
+            or bool(entry.get("duration"))
+            or (f".{ext}" in _VIDEO_EXTENSIONS)
+        )
+        media_url = cls._best_entry_media_url(entry, want_video=is_video)
+        if not media_url:
+            return None
+        return CarouselSlide(url=media_url, is_video=is_video)
+
     def _download_image_sync(self, image_url: str, output_base: str) -> Optional[str]:
         """
         Скачивает картинку по прямой ссылке и сохраняет её рядом с output_base,
@@ -699,6 +831,9 @@ class VideoDownloader:
                 duration=result.duration,
                 is_photo=True,
                 photo_paths=[output_path],
+                # Сохраняем слайды карусели: rich-карусель ещё будет отправлена, а
+                # локальный фолбэк теперь валидное фото, а не 0-секундное видео.
+                carousel_slides=result.carousel_slides,
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning("Frame extraction failed: %s", e)
@@ -734,6 +869,8 @@ class VideoDownloader:
             if result.success and is_instagram_photo_candidate_url(url) and result.file_path:
                 # Extract frame for photo posts (yt-dlp downloads them as 0-second videos).
                 # Also attempt for None duration — missing metadata on a /p/ post likely means photo.
+                # Для карусели кадр тоже извлекаем (фолбэк-фото должно быть валидным);
+                # carousel_slides переносится в результат, так что rich-карусель отправится.
                 if result.duration is None or result.duration <= 1.0:
                     frame_result = await loop.run_in_executor(
                         None, lambda: self._extract_photo_frame(result)
@@ -799,6 +936,7 @@ class VideoDownloader:
 
         batch_id = str(uuid.uuid4())[:8]
         downloaded: list[str] = []
+        slide_urls: list[str] = []
         for idx, variants in enumerate(groups):
             variants.sort(key=self._is_resized_variant)
             output_base = str(self.download_dir / f"{batch_id}_{idx}")
@@ -806,18 +944,30 @@ class VideoDownloader:
                 path = self._download_image_sync(variant_url, output_base)
                 if path:
                     downloaded.append(path)
+                    # Запоминаем URL варианта, который реально скачался: его же
+                    # отдадим Telegram в rich-карусели — раз скачали мы, скорее
+                    # всего скачает и он (тот же подписанный CDN-URL).
+                    slide_urls.append(variant_url)
                     break
 
         if not downloaded:
             return None
 
         title = meta.get("title") or "Photo"
+        # Карусель (≥2 слайдов) можно отправить нативным <tg-slideshow>;
+        # одиночное фото отправляется обычным sendPhoto, slideshow не нужен.
+        carousel_slides = (
+            [CarouselSlide(url=u, is_video=False) for u in slide_urls]
+            if len(slide_urls) >= 2
+            else None
+        )
         return DownloadResult(
             success=True,
             file_path=downloaded[0],
             title=title,
             is_photo=True,
             photo_paths=downloaded,
+            carousel_slides=carousel_slides,
         )
 
     def _download_sync(self, url: str, ydl_opts: dict) -> DownloadResult:
@@ -851,6 +1001,12 @@ class VideoDownloader:
                     list(info.keys()) if isinstance(info, dict) else "N/A",
                 )
 
+                carousel_slides: Optional[list] = None
+                # Заголовок поста-плейлиста (подпись карусели) надо взять ДО того,
+                # как info схлопнется в первый элемент ниже.
+                playlist_title: Optional[str] = (
+                    info.get("title") if isinstance(info, dict) else None
+                )
                 if "entries" in info and info["entries"]:
                     entries = info["entries"]
                     logger.debug(
@@ -858,6 +1014,22 @@ class VideoDownloader:
                         type(entries).__name__,
                         len(entries) if hasattr(entries, "__len__") else "N/A",
                     )
+                    # Карусель Instagram (пост /p/ с несколькими медиа): собираем
+                    # упорядоченные слайды (фото И видео) как публичные URL — для
+                    # нативной rich-карусели (<tg-slideshow>). Первый слайд всё
+                    # равно скачивается ниже как локальный фолбэк на случай, если
+                    # rich-сообщение отправить не удастся.
+                    if self._supports_carousel(download_url):
+                        slides: list[CarouselSlide] = []
+                        for entry in entries:
+                            if isinstance(entry, dict):
+                                slide = self._entry_to_slide(entry)
+                                if slide is not None:
+                                    slides.append(slide)
+                            if len(slides) >= MAX_CAROUSEL_ITEMS:
+                                break
+                        if len(slides) >= 2:
+                            carousel_slides = slides
                     for entry in entries:
                         if entry is not None and isinstance(entry, dict):
                             info = entry
@@ -870,6 +1042,9 @@ class VideoDownloader:
                         )
 
                 title = info.get("title", "Видео") if isinstance(info, dict) else "Видео"
+                # Для карусели подпись берём из заголовка поста, а не первого слайда.
+                if carousel_slides and playlist_title:
+                    title = playlist_title
                 duration = info.get("duration") if isinstance(info, dict) else None
 
                 # Multiple images captured via progress hook → photo carousel
@@ -885,6 +1060,7 @@ class VideoDownloader:
                         duration=duration,
                         is_photo=True,
                         photo_paths=image_files[:MAX_CAROUSEL_ITEMS],
+                        carousel_slides=carousel_slides,
                     )
 
                 downloaded_file_path = existing[-1] if existing else None
@@ -937,6 +1113,7 @@ class VideoDownloader:
                         duration=duration,
                         is_photo=is_photo,
                         photo_paths=[downloaded_file_path] if is_photo else None,
+                        carousel_slides=carousel_slides,
                     )
                 else:
                     outtmpl = opts.get("outtmpl", "")
@@ -958,6 +1135,7 @@ class VideoDownloader:
                             duration=duration,
                             is_photo=is_photo,
                             photo_paths=[found_file] if is_photo else None,
+                            carousel_slides=carousel_slides,
                         )
                     return DownloadResult(
                         success=False,

@@ -25,6 +25,7 @@
   "download.send_error": "❌ <b>Ошибка при отправке</b>\n\nПопробуйте позже.",
   "download.media_label.video": "видео",
   "download.media_label.photo": "фото",
+  "download.media_label.carousel": "карусель",
   "download.cmd.prompt": "🔗 Отправьте ссылку на видео с YouTube, Instagram, TikTok или X/Twitter.",
   "download.cmd.cancelled": "❌ Загрузка отменена.",
   "download.cmd.url_not_found": "🤔 Ссылка не найдена. Отправьте ссылку на видео или нажмите ❌ для отмены.",

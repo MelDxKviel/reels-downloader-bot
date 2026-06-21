@@ -25,6 +25,7 @@
   "download.send_error": "❌ <b>Send error</b>\n\nTry again later.",
   "download.media_label.video": "video",
   "download.media_label.photo": "photo",
+  "download.media_label.carousel": "carousel",
   "download.cmd.prompt": "🔗 Send a video link from YouTube, Instagram, TikTok or X/Twitter.",
   "download.cmd.cancelled": "❌ Download cancelled.",
   "download.cmd.url_not_found": "🤔 No link found. Send a video link or press ❌ to cancel.",
