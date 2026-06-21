@@ -854,11 +854,23 @@ class VideoDownloader:
 
         loop = asyncio.get_event_loop()
 
+        single_photo_fallback: Optional[DownloadResult] = None
         if is_instagram_photo_candidate_url(url):
             photo_result = await loop.run_in_executor(None, lambda: self._try_instagram_photo(url))
             if photo_result is not None:
-                self.add_to_cache(url, photo_result)
-                return photo_result
+                # Скрейп уже собрал полную карусель (>=2 слайдов) — отдаём как есть.
+                if photo_result.carousel_slides:
+                    self.add_to_cache(url, photo_result)
+                    return photo_result
+                # Найдено только одно фото. Это может быть и одиночный пост, и
+                # карусель, слайды которой Instagram прячет от публичного скрейпа.
+                # Если заданы IG-cookies, проваливаемся в yt-dlp — он с куками
+                # перечислит все слайды карусели. Без кук yt-dlp всё равно отдаст
+                # 403, поэтому оставляем одиночное фото и не тратим время.
+                if self._get_instagram_cookiefile() is None:
+                    self.add_to_cache(url, photo_result)
+                    return photo_result
+                single_photo_fallback = photo_result
 
         file_id = str(uuid.uuid4())[:8]
         output_path = str(self.download_dir / f"{file_id}.%(ext)s")
@@ -879,8 +891,16 @@ class VideoDownloader:
                         result = frame_result
             if result.success:
                 self.add_to_cache(url, result)
+                return result
+            # yt-dlp не смог, но публичный скрейп дал одиночное фото — отдаём его.
+            if single_photo_fallback is not None:
+                self.add_to_cache(url, single_photo_fallback)
+                return single_photo_fallback
             return result
         except Exception as e:
+            if single_photo_fallback is not None:
+                self.add_to_cache(url, single_photo_fallback)
+                return single_photo_fallback
             msg = str(e)
             return DownloadResult(
                 success=False,
