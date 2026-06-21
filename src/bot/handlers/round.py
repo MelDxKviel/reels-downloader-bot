@@ -160,7 +160,9 @@ async def _download_and_send_round(
     await status_msg.edit_text(t("round.download_status", platform=platform))
 
     try:
-        result = await downloader.download(url)
+        # allow_carousel=False: для конвертации нужен реальный видеофайл, а не
+        # фото-слайды карусели (их file_path указывал бы на JPG).
+        result = await downloader.download(url, allow_carousel=False)
     except Exception as e:
         logger.error("Ошибка скачивания: %s", e, exc_info=True)
         await status_msg.edit_text(t("round.download_error"))

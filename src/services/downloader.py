@@ -842,8 +842,16 @@ class VideoDownloader:
             logger.warning("Frame extraction failed: %s", e)
             return None
 
-    async def download(self, url: str) -> DownloadResult:
-        """Скачивает видео по URL."""
+    async def download(self, url: str, allow_carousel: bool = True) -> DownloadResult:
+        """Скачивает видео по URL.
+
+        ``allow_carousel`` — собирать ли «фото-карусельные» результаты
+        (Instagram-скрейп, fxtwitter). Хендлеры конвертации (/mp3, /gif,
+        /voice, /round) и inline это отключают: им нужен реальный видеофайл в
+        ``file_path`` для FFmpeg/выгрузки, а не фото-слайды. В этом режиме кэш
+        также не читаем и не пишем, чтобы карусельный и одиночный результаты
+        для одного URL не перетирали друг друга.
+        """
         if not is_supported_url(url):
             return DownloadResult(
                 success=False,
@@ -851,14 +859,15 @@ class VideoDownloader:
                 error_code="downloader.error.unsupported_url",
             )
 
-        cached = self.get_from_cache(url)
-        if cached:
-            return cached
+        if allow_carousel:
+            cached = self.get_from_cache(url)
+            if cached:
+                return cached
 
         loop = asyncio.get_event_loop()
 
         single_photo_fallback: Optional[DownloadResult] = None
-        if is_instagram_photo_candidate_url(url):
+        if allow_carousel and is_instagram_photo_candidate_url(url):
             photo_result = await loop.run_in_executor(None, lambda: self._try_instagram_photo(url))
             if photo_result is not None:
                 # Скрейп уже собрал полную карусель (>=2 слайдов) — отдаём как есть.
@@ -878,7 +887,7 @@ class VideoDownloader:
         # X/Twitter: если в твите есть фото, собираем полную карусель через
         # fxtwitter (yt-dlp теряет фото из Twitter-плейлиста). Видео-онли и
         # одиночные твиты вернут None и пойдут обычным yt-dlp-путём ниже.
-        if is_twitter_url(url):
+        if allow_carousel and is_twitter_url(url):
             twitter_result = await loop.run_in_executor(
                 None, lambda: self._try_twitter_carousel(url)
             )
@@ -910,7 +919,8 @@ class VideoDownloader:
             if result.success and (
                 result.carousel_slides or result.is_photo or single_photo_fallback is None
             ):
-                self.add_to_cache(url, result)
+                if allow_carousel:
+                    self.add_to_cache(url, result)
                 return result
             # Фолбэк НЕ кэшируем: транзиентный 403/таймаут yt-dlp не должен
             # навсегда запинить URL на одно фото — следующий запрос повторит
