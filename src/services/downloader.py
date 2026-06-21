@@ -889,17 +889,23 @@ class VideoDownloader:
                     )
                     if frame_result is not None:
                         result = frame_result
-            if result.success:
+            # Принимаем результат yt-dlp, только если он реально добавил ценность:
+            # собрал карусель или вернул фото. Иначе (одиночный пост, который
+            # yt-dlp отдал 0-секундным видео, а FFmpeg не сконвертировал) лучше
+            # отдать уже скачанное скрейпом фото, а не битое 0-секундное видео.
+            if result.success and (
+                result.carousel_slides or result.is_photo or single_photo_fallback is None
+            ):
                 self.add_to_cache(url, result)
                 return result
-            # yt-dlp не смог, но публичный скрейп дал одиночное фото — отдаём его.
+            # Фолбэк НЕ кэшируем: транзиентный 403/таймаут yt-dlp не должен
+            # навсегда запинить URL на одно фото — следующий запрос повторит
+            # извлечение и сможет восстановить полную карусель.
             if single_photo_fallback is not None:
-                self.add_to_cache(url, single_photo_fallback)
                 return single_photo_fallback
             return result
         except Exception as e:
             if single_photo_fallback is not None:
-                self.add_to_cache(url, single_photo_fallback)
                 return single_photo_fallback
             msg = str(e)
             return DownloadResult(

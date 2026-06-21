@@ -236,6 +236,39 @@ async def test_pp_single_photo_with_cookies_falls_back_when_ytdlp_fails(tmp_path
     assert res.success
     assert res.is_photo is True
     assert res.file_path == str(photo)
+    # A transient failure must NOT be cached, or it would pin the URL to one photo
+    # and defeat carousel recovery on a later request with working cookies.
+    assert d.get_from_cache("https://www.instagram.com/p/ABC/") is None
+
+
+@pytest.mark.asyncio
+async def test_pp_single_photo_with_cookies_prefers_scraped_photo_over_bare_video(tmp_path: Path):
+    """A genuine single photo that yt-dlp returns as a 0s video (no FFmpeg to convert)
+    must yield the scraped photo, not the bare video — and stay uncached (retryable)."""
+    d = VideoDownloader(str(tmp_path))
+    d.has_ffmpeg = False  # frame extraction can't rescue the 0s video
+    photo = tmp_path / "p.jpg"
+    photo.write_bytes(b"x" * 2048)
+    zero_video = tmp_path / "zero.mp4"
+    zero_video.write_bytes(b"y" * 2048)
+    single = DownloadResult(
+        success=True, file_path=str(photo), is_photo=True, photo_paths=[str(photo)], title="P"
+    )
+    url = "https://www.instagram.com/p/SOLO/"
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=single),
+        patch.object(d, "_get_instagram_cookiefile", return_value="/fake/cookies.txt"),
+        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+    ):
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {"title": "Solo", "duration": 0.0}
+        mock_ydl.prepare_filename.return_value = str(zero_video)
+        res = await d.download(url)
+
+    assert res.is_photo is True
+    assert res.file_path == str(photo)  # scraped photo, not the bare 0s video
+    assert d.get_from_cache(url) is None
 
 
 # ── yt-dlp entry → CarouselSlide (mixed photo/video carousels) ─────────────────
