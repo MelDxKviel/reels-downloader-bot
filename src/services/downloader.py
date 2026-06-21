@@ -842,8 +842,16 @@ class VideoDownloader:
             logger.warning("Frame extraction failed: %s", e)
             return None
 
-    async def download(self, url: str) -> DownloadResult:
-        """Скачивает видео по URL."""
+    async def download(self, url: str, allow_carousel: bool = True) -> DownloadResult:
+        """Скачивает видео по URL.
+
+        ``allow_carousel`` — собирать ли «фото-карусельные» результаты
+        (Instagram-скрейп, fxtwitter). Хендлеры конвертации (/mp3, /gif,
+        /voice, /round) и inline это отключают: им нужен реальный видеофайл в
+        ``file_path`` для FFmpeg/выгрузки, а не фото-слайды. В этом режиме кэш
+        также не читаем и не пишем, чтобы карусельный и одиночный результаты
+        для одного URL не перетирали друг друга.
+        """
         if not is_supported_url(url):
             return DownloadResult(
                 success=False,
@@ -851,14 +859,15 @@ class VideoDownloader:
                 error_code="downloader.error.unsupported_url",
             )
 
-        cached = self.get_from_cache(url)
-        if cached:
-            return cached
+        if allow_carousel:
+            cached = self.get_from_cache(url)
+            if cached:
+                return cached
 
         loop = asyncio.get_event_loop()
 
         single_photo_fallback: Optional[DownloadResult] = None
-        if is_instagram_photo_candidate_url(url):
+        if allow_carousel and is_instagram_photo_candidate_url(url):
             photo_result = await loop.run_in_executor(None, lambda: self._try_instagram_photo(url))
             if photo_result is not None:
                 # Скрейп уже собрал полную карусель (>=2 слайдов) — отдаём как есть.
@@ -874,6 +883,17 @@ class VideoDownloader:
                     self.add_to_cache(url, photo_result)
                     return photo_result
                 single_photo_fallback = photo_result
+
+        # X/Twitter: если в твите есть фото, собираем полную карусель через
+        # fxtwitter (yt-dlp теряет фото из Twitter-плейлиста). Видео-онли и
+        # одиночные твиты вернут None и пойдут обычным yt-dlp-путём ниже.
+        if allow_carousel and is_twitter_url(url):
+            twitter_result = await loop.run_in_executor(
+                None, lambda: self._try_twitter_carousel(url)
+            )
+            if twitter_result is not None:
+                self.add_to_cache(url, twitter_result)
+                return twitter_result
 
         file_id = str(uuid.uuid4())[:8]
         output_path = str(self.download_dir / f"{file_id}.%(ext)s")
@@ -899,7 +919,8 @@ class VideoDownloader:
             if result.success and (
                 result.carousel_slides or result.is_photo or single_photo_fallback is None
             ):
-                self.add_to_cache(url, result)
+                if allow_carousel:
+                    self.add_to_cache(url, result)
                 return result
             # Фолбэк НЕ кэшируем: транзиентный 403/таймаут yt-dlp не должен
             # навсегда запинить URL на одно фото — следующий запрос повторит
@@ -997,6 +1018,93 @@ class VideoDownloader:
             is_photo=True,
             photo_paths=downloaded,
             carousel_slides=carousel_slides,
+        )
+
+    def _fetch_twitter_media(self, url: str):
+        """Запрашивает ВСЕ медиа твита (фото + видео) через публичный fxtwitter API.
+
+        yt-dlp для X/Twitter строит плейлист только из видео (фото отбрасываются
+        в ``TwitterIE``), поэтому для каруселей с фото берём полный упорядоченный
+        список из ``api.fxtwitter.com`` — публично, без cookies. Возвращает
+        кортеж ``(slides, caption)`` или ``None``.
+        """
+        path = urlparse(url).path or ""
+        if "/status/" not in path:
+            return None
+        api_url = f"https://api.fxtwitter.com{path}"
+        try:
+            req = urllib.request.Request(
+                api_url,
+                headers={"User-Agent": BROWSER_USER_AGENT, "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read(4 * 1024 * 1024)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            logger.debug("fxtwitter fetch failed for %s: %s", api_url, e)
+            return None
+        try:
+            data = json.loads(raw.decode("utf-8", errors="ignore"))
+        except (ValueError, json.JSONDecodeError):
+            return None
+        tweet = data.get("tweet") if isinstance(data, dict) else None
+        if not isinstance(tweet, dict):
+            return None
+        media = tweet.get("media")
+        all_media = media.get("all") if isinstance(media, dict) else None
+        if not isinstance(all_media, list):
+            return None
+        slides: list[CarouselSlide] = []
+        for item in all_media:
+            if not isinstance(item, dict):
+                continue
+            media_url = item.get("url")
+            if not isinstance(media_url, str) or not media_url.startswith("http"):
+                continue
+            is_video = item.get("type") in ("video", "gif")
+            slides.append(CarouselSlide(url=media_url, is_video=is_video))
+            if len(slides) >= MAX_CAROUSEL_ITEMS:
+                break
+        if not slides:
+            return None
+        caption = tweet.get("text")
+        caption = caption if isinstance(caption, str) and caption.strip() else None
+        return slides, caption
+
+    def _try_twitter_carousel(self, url: str) -> Optional[DownloadResult]:
+        """Карусель X/Twitter с фото: собирает ПОЛНЫЙ упорядоченный список слайдов
+        через fxtwitter и скачивает фото-слайды для локального фолбэка.
+
+        Видео-онли твиты отдаём обычному yt-dlp-пути: его playlist-entries
+        покрывают все видео и дают полноценный локальный фолбэк. Здесь же
+        вмешиваемся только когда в твите есть фото (их yt-dlp как раз теряет).
+        """
+        fetched = self._fetch_twitter_media(url)
+        if fetched is None:
+            return None
+        slides, caption = fetched
+        if len(slides) < 2 or all(slide.is_video for slide in slides):
+            return None
+        # Скачиваем фото-слайды для альбома-фолбэка (видео остаются URL-only:
+        # их проигрывает rich-карусель, а фолбэк-альбом покажет хотя бы фото).
+        batch_id = str(uuid.uuid4())[:8]
+        photo_paths: list[str] = []
+        for idx, slide in enumerate(slides):
+            if slide.is_video:
+                continue
+            path = self._download_image_sync(
+                slide.url, str(self.download_dir / f"{batch_id}_{idx}")
+            )
+            if path:
+                photo_paths.append(path)
+        if not photo_paths:
+            return None
+        return DownloadResult(
+            success=True,
+            file_path=photo_paths[0],
+            title=(caption or "Tweet"),
+            is_photo=True,
+            photo_paths=photo_paths,
+            carousel_slides=slides,
         )
 
     def _download_sync(self, url: str, ydl_opts: dict) -> DownloadResult:

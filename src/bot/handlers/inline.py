@@ -355,8 +355,10 @@ async def chosen_inline_handler(
     user_id = chosen.from_user.id
 
     # Скачиваем видео (общий шаг для всех операций).
+    # allow_carousel=False: inline отдаёт одиночное медиа (видео/фото/MP3) и
+    # грузит file_path в storage — нужен реальный файл, а не URL-слайды карусели.
     try:
-        result = await downloader.download(url)
+        result = await downloader.download(url, allow_carousel=False)
     except Exception as e:
         logger.error("Ошибка скачивания (inline): %s", e, exc_info=True)
         await _safe_edit_text(bot, inline_message_id, t("inline.error.generic"))

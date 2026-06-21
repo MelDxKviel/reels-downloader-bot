@@ -3,6 +3,7 @@ Tests for the native Instagram → Telegram rich carousel (Bot API 10.1
 ``<tg-slideshow>``): slide-URL extraction, caching round-trip, and HTML builder.
 """
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -429,26 +430,133 @@ def test_is_twitter_url():
     assert not is_twitter_url("https://example.com/")
 
 
+class _FakeHTTPResponse:
+    """Minimal urllib response stand-in for mocking the fxtwitter fetch."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self.headers = {"Content-Type": "application/json"}
+
+    def read(self, _n: int = -1) -> bytes:
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+def test_fetch_twitter_media_parses_ordered_mixed(tmp_path: Path):
+    """fxtwitter's tweet.media.all is parsed into ordered slides (photo + video + gif)."""
+    d = VideoDownloader(str(tmp_path))
+    payload = json.dumps(
+        {
+            "code": 200,
+            "message": "OK",
+            "tweet": {
+                "text": "hello world",
+                "media": {
+                    "all": [
+                        {
+                            "type": "photo",
+                            "url": "https://pbs.twimg.com/media/a.jpg",
+                            "width": 1200,
+                        },
+                        {"type": "video", "url": "https://video.twimg.com/b.mp4", "width": 720},
+                        {"type": "gif", "url": "https://video.twimg.com/c.mp4"},
+                    ]
+                },
+            },
+        }
+    ).encode()
+    with patch(
+        "src.services.downloader.urllib.request.urlopen",
+        return_value=_FakeHTTPResponse(payload),
+    ):
+        out = d._fetch_twitter_media("https://x.com/user/status/123")
+
+    assert out is not None
+    slides, caption = out
+    assert [(s.url, s.is_video) for s in slides] == [
+        ("https://pbs.twimg.com/media/a.jpg", False),
+        ("https://video.twimg.com/b.mp4", True),
+        ("https://video.twimg.com/c.mp4", True),
+    ]
+    assert caption == "hello world"
+
+
 @pytest.mark.asyncio
-async def test_download_twitter_carousel_harvests_slides(tmp_path: Path):
-    """A multi-media X/Twitter post yields a native carousel (carousel_slides) built
-    from the public twimg URLs — no cookies required."""
+async def test_download_twitter_mixed_carousel_via_fxtwitter(tmp_path: Path):
+    """A photo+video tweet yields a COMPLETE native carousel (photos included) sourced
+    from fxtwitter; only the photo slides are downloaded for the local fallback."""
+    d = VideoDownloader(str(tmp_path))
+    slides = [
+        CarouselSlide("https://pbs.twimg.com/media/a.jpg", is_video=False),
+        CarouselSlide("https://video.twimg.com/b.mp4", is_video=True),
+    ]
+
+    def fake_dl(image_url: str, output_base: str):
+        path = f"{output_base}.jpg"
+        with open(path, "wb") as f:
+            f.write(b"x" * 2048)
+        return path
+
+    with (
+        patch.object(d, "_fetch_twitter_media", return_value=(slides, "a tweet")),
+        patch.object(d, "_download_image_sync", side_effect=fake_dl),
+    ):
+        res = await d.download("https://x.com/user/status/123")
+
+    assert res.success
+    assert res.is_photo is True
+    assert [(s.url, s.is_video) for s in res.carousel_slides] == [
+        ("https://pbs.twimg.com/media/a.jpg", False),
+        ("https://video.twimg.com/b.mp4", True),
+    ]
+    assert len(res.photo_paths) == 1  # only the photo slide is fetched for the fallback
+    assert res.title == "a tweet"
+
+
+def test_try_twitter_carousel_skips_video_only(tmp_path: Path):
+    """Video-only tweets are left to the yt-dlp entries path (complete + local files)."""
+    d = VideoDownloader(str(tmp_path))
+    slides = [
+        CarouselSlide("https://video.twimg.com/1.mp4", is_video=True),
+        CarouselSlide("https://video.twimg.com/2.mp4", is_video=True),
+    ]
+    with patch.object(d, "_fetch_twitter_media", return_value=(slides, "cap")):
+        assert d._try_twitter_carousel("https://x.com/u/status/1") is None
+
+
+@pytest.mark.asyncio
+async def test_download_twitter_video_only_uses_ytdlp_entries(tmp_path: Path):
+    """A multi-video tweet (no photos) is harvested from yt-dlp playlist entries."""
     d = VideoDownloader(str(tmp_path))
     d.has_ffmpeg = False
-    url = "https://x.com/user/status/123456"
-    first = tmp_path / "first.jpg"
+    url = "https://x.com/u/status/777"
+    first = tmp_path / "first.mp4"
     first.write_bytes(b"x" * 2048)
     info = {
-        "title": "A tweet",
+        "title": "Tweet",
         "entries": [
             {
-                "ext": "jpg",
-                "vcodec": "none",
-                "formats": [{"url": "https://pbs.twimg.com/media/1.jpg", "width": 1200}],
+                "ext": "mp4",
+                "duration": 5,
+                "vcodec": "h264",
+                "acodec": "aac",
+                "formats": [
+                    {
+                        "url": "https://video.twimg.com/1.mp4",
+                        "vcodec": "h264",
+                        "acodec": "aac",
+                        "height": 720,
+                    }
+                ],
             },
             {
                 "ext": "mp4",
-                "duration": 6,
+                "duration": 7,
                 "vcodec": "h264",
                 "acodec": "aac",
                 "formats": [
@@ -462,16 +570,86 @@ async def test_download_twitter_carousel_harvests_slides(tmp_path: Path):
             },
         ],
     }
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with (
+        patch.object(d, "_fetch_twitter_media", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+    ):
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = info
         mock_ydl.prepare_filename.return_value = str(first)
         res = await d.download(url)
 
-    assert res.success
     assert res.carousel_slides is not None
-    assert [(s.url, s.is_video) for s in res.carousel_slides] == [
-        ("https://pbs.twimg.com/media/1.jpg", False),
-        ("https://video.twimg.com/2.mp4", True),
+    assert [s.url for s in res.carousel_slides] == [
+        "https://video.twimg.com/1.mp4",
+        "https://video.twimg.com/2.mp4",
     ]
+    assert all(s.is_video for s in res.carousel_slides)
+
+
+# ── allow_carousel=False (conversions / inline want the real media file) ──────
+
+
+@pytest.mark.asyncio
+async def test_download_allow_carousel_false_skips_fxtwitter_and_gets_video(tmp_path: Path):
+    """Conversions/inline pass allow_carousel=False: the fxtwitter photo path is
+    skipped and yt-dlp's actual video file is returned (so FFmpeg gets a video,
+    not a JPG). The transient result is not cached."""
+    d = VideoDownloader(str(tmp_path))
+    video = tmp_path / "vid.mp4"
+    video.write_bytes(b"x" * 2048)
+    url = "https://x.com/u/status/123"
+    fx = MagicMock()  # if the fxtwitter path ran, this would be called
+    with (
+        patch.object(d, "_fetch_twitter_media", fx),
+        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+    ):
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {"title": "vid", "duration": 12.0}
+        mock_ydl.prepare_filename.return_value = str(video)
+        res = await d.download(url, allow_carousel=False)
+
+    fx.assert_not_called()
+    assert res.success
+    assert res.is_photo is False
+    assert res.file_path == str(video)
+    assert d.get_from_cache(url) is None  # not cached → no cross-contamination
+
+
+@pytest.mark.asyncio
+async def test_download_allow_carousel_false_ignores_cached_carousel(tmp_path: Path):
+    """A previously cached photo-carousel must NOT be served to an allow_carousel=False
+    caller — it re-downloads to get the real video."""
+    d = VideoDownloader(str(tmp_path))
+    photo = tmp_path / "p.jpg"
+    photo.write_bytes(b"x" * 2048)
+    url = "https://x.com/u/status/9"
+    d.add_to_cache(
+        url,
+        DownloadResult(
+            success=True,
+            file_path=str(photo),
+            is_photo=True,
+            photo_paths=[str(photo)],
+            carousel_slides=[
+                CarouselSlide("https://pbs.twimg.com/1.jpg"),
+                CarouselSlide("https://video.twimg.com/2.mp4", is_video=True),
+            ],
+        ),
+    )
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"y" * 2048)
+    with (
+        patch.object(d, "_fetch_twitter_media", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+    ):
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {"title": "v", "duration": 10.0}
+        mock_ydl.prepare_filename.return_value = str(video)
+        res = await d.download(url, allow_carousel=False)
+
+    assert res.is_photo is False
+    assert res.file_path == str(video)
