@@ -32,6 +32,7 @@ from src.services.url_utils import (
     is_instagram_url,
     is_kkinstagram_url,
     is_supported_url,
+    is_twitter_url,
     is_youtube_url,
     should_retry_with_kkinstagram,
 )
@@ -601,10 +602,12 @@ class VideoDownloader:
     def _supports_carousel(url: str) -> bool:
         """Платформы, чей пост может быть каруселью из нескольких медиа.
 
-        Пока только Instagram (включая зеркало kkinstagram). У X/Twitter
-        мульти-фото уходит привычным альбомом, карусель для него не собираем.
+        Instagram (включая зеркало kkinstagram) и X/Twitter: у обоих один пост
+        может содержать несколько фото/видео, которые мы отдаём нативной
+        каруселью (<tg-slideshow>). У X/Twitter медиа публичны (pbs.twimg.com /
+        video.twimg.com) и не требуют cookies — Telegram скачивает их по URL.
         """
-        return is_instagram_url(url) or is_kkinstagram_url(url)
+        return is_instagram_url(url) or is_kkinstagram_url(url) or is_twitter_url(url)
 
     @staticmethod
     def _best_entry_media_url(entry: dict, want_video: bool) -> Optional[str]:
