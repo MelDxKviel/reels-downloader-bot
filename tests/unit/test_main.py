@@ -1,5 +1,6 @@
 """Tests for src/main.py startup logic."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -114,6 +115,65 @@ async def test_main_no_admin_users_warning():
                         with patch("src.main.get_main_router", return_value=router):
                             await main_mod.main()
     dp_i.start_polling.assert_awaited_once()
+
+
+# ── _cache_cleanup_loop ───────────────────────────────────────────────────────
+
+
+def _sleep_then_cancel(after: int = 1):
+    """Fake asyncio.sleep that lets the loop run ``after`` times, then cancels it."""
+    state = {"n": 0}
+
+    async def fake_sleep(_seconds):
+        state["n"] += 1
+        if state["n"] > after:
+            raise asyncio.CancelledError()
+
+    return fake_sleep, state
+
+
+@pytest.mark.asyncio
+async def test_cache_cleanup_loop_cleans_when_enabled():
+    db = make_db()
+    db.get_cache_autoclean = AsyncMock(return_value=True)
+    db.get_cache_max_age_hours = AsyncMock(return_value=1)
+    fake_sleep, _ = _sleep_then_cancel(after=1)
+
+    with patch("src.main.asyncio.sleep", side_effect=fake_sleep):
+        with patch("src.main.downloader") as mock_dl:
+            mock_dl.cleanup_expired.return_value = (2, 2)
+            with pytest.raises(asyncio.CancelledError):
+                await main_mod._cache_cleanup_loop(db)
+
+    mock_dl.cleanup_expired.assert_called_with(3600)  # 1h → 3600s
+
+
+@pytest.mark.asyncio
+async def test_cache_cleanup_loop_skips_when_disabled():
+    db = make_db()
+    db.get_cache_autoclean = AsyncMock(return_value=False)
+    fake_sleep, _ = _sleep_then_cancel(after=1)
+
+    with patch("src.main.asyncio.sleep", side_effect=fake_sleep):
+        with patch("src.main.downloader") as mock_dl:
+            with pytest.raises(asyncio.CancelledError):
+                await main_mod._cache_cleanup_loop(db)
+
+    mock_dl.cleanup_expired.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cache_cleanup_loop_swallows_errors_and_continues():
+    db = make_db()
+    db.get_cache_autoclean = AsyncMock(side_effect=RuntimeError("db down"))
+    fake_sleep, state = _sleep_then_cancel(after=1)
+
+    with patch("src.main.asyncio.sleep", side_effect=fake_sleep):
+        with pytest.raises(asyncio.CancelledError):
+            await main_mod._cache_cleanup_loop(db)
+
+    # Iteration 1 raised (swallowed); the loop reached a 2nd sleep that cancelled.
+    assert state["n"] == 2
 
 
 def test_run_invokes_asyncio_run():

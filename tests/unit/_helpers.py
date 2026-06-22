@@ -109,4 +109,8 @@ def make_db():
     db.set_setting = AsyncMock()
     db.is_feature_enabled = AsyncMock(return_value=False)
     db.set_feature_enabled = AsyncMock()
+    db.get_cache_autoclean = AsyncMock(return_value=False)
+    db.set_cache_autoclean = AsyncMock()
+    db.get_cache_max_age_hours = AsyncMock(return_value=168)
+    db.set_cache_max_age_hours = AsyncMock()
     return db

@@ -294,6 +294,47 @@ async def test_set_setting_recovers_from_concurrent_insert_race(db_service, monk
     assert await db_service.get_setting("raced") == "mine"
 
 
+# ── cache auto-clean settings ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cache_autoclean_default(db_service):
+    assert await db_service.get_cache_autoclean() is False
+    assert await db_service.get_cache_autoclean(default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_cache_autoclean(db_service):
+    await db_service.set_cache_autoclean(True)
+    assert await db_service.get_cache_autoclean() is True
+    await db_service.set_cache_autoclean(False)
+    # An explicit stored "0" overrides the default.
+    assert await db_service.get_cache_autoclean(default=True) is False
+
+
+@pytest.mark.asyncio
+async def test_cache_max_age_default_when_unset(db_service):
+    assert await db_service.get_cache_max_age_hours(168) == 168
+
+
+@pytest.mark.asyncio
+async def test_set_and_get_cache_max_age(db_service):
+    await db_service.set_cache_max_age_hours(72)
+    assert await db_service.get_cache_max_age_hours(168) == 72
+
+
+@pytest.mark.asyncio
+async def test_cache_max_age_falls_back_on_garbage(db_service):
+    await db_service.set_setting("cache.autoclean.max_age_hours", "not-a-number")
+    assert await db_service.get_cache_max_age_hours(168) == 168
+
+
+@pytest.mark.asyncio
+async def test_cache_max_age_falls_back_on_nonpositive(db_service):
+    await db_service.set_cache_max_age_hours(0)
+    assert await db_service.get_cache_max_age_hours(168) == 168
+
+
 @pytest.mark.asyncio
 async def test_set_setting_reraises_if_row_vanishes_after_rollback(db_service, monkeypatch):
     """Edge case: IntegrityError fires but the row is gone on re-select.

@@ -92,3 +92,37 @@ except ValueError:
 # Если не задано — используется первый ID из ADMIN_USERS.
 _video_storage_env = os.getenv("VIDEO_STORAGE_CHAT_ID", "").strip()
 VIDEO_STORAGE_CHAT_ID: Optional[int] = int(_video_storage_env) if _video_storage_env else None
+
+# === Автоочистка кэша ===
+#
+# Фоновая задача периодически удаляет из кэша записи старше заданного возраста
+# (вместе с их файлами на диске), чтобы папка downloads не росла бесконечно.
+# Включение и срок хранения настраиваются администратором в рантайме через
+# /cache (хранятся в bot_settings); значения ниже — дефолты до первой настройки
+# и параметры, которые меняются только через переменные окружения.
+
+# Включена ли автоочистка по умолчанию (пока админ не переключил её в /cache).
+CACHE_AUTOCLEAN_DEFAULT: bool = os.getenv("CACHE_AUTOCLEAN_DEFAULT", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# Максимальный возраст записи кэша по умолчанию (часы): записи старше удаляются.
+_cache_max_age_env = os.getenv("CACHE_MAX_AGE_HOURS", "168").strip()
+try:
+    CACHE_MAX_AGE_HOURS: int = max(1, int(_cache_max_age_env))
+except ValueError:
+    CACHE_MAX_AGE_HOURS = 168
+
+# Как часто фоновая задача проверяет кэш (секунды). Минимум — минута.
+_cache_interval_env = os.getenv("CACHE_CLEANUP_INTERVAL", "3600").strip()
+try:
+    CACHE_CLEANUP_INTERVAL: int = max(60, int(_cache_interval_env))
+except ValueError:
+    CACHE_CLEANUP_INTERVAL = 3600
+
+# Пресеты срока хранения (часы) для переключения кнопкой в /cache:
+# 6 ч · 12 ч · 1 день · 3 дня · 7 дней · 30 дней.
+CACHE_MAX_AGE_PRESETS: Tuple[int, ...] = (6, 12, 24, 72, 168, 720)

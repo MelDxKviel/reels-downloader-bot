@@ -1,15 +1,12 @@
 """
-Общие команды бота: /start, /help, /id, /cache, /clearcache
+Общие команды бота: /start, /help, /id
 """
-
-import os
 
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import LinkPreviewOptions, Message
 
 from src.bot.handlers.admin import is_admin
-from src.services.downloader import downloader
 from src.services.i18n import Translator
 
 router = Router()
@@ -43,24 +40,3 @@ async def cmd_id(message: Message, t: Translator) -> None:
             username=user.username or t("id.username_unset"),
         )
     )
-
-
-@router.message(Command("cache"))
-async def cmd_cache(message: Message, t: Translator) -> None:
-    """Показывает информацию о кэше."""
-    cache_size = len(downloader.cache)
-    total_size = 0
-    for data in downloader.cache.values():
-        file_path = data.get("file_path")
-        if file_path and os.path.exists(file_path):
-            total_size += os.path.getsize(file_path)
-
-    size_mb = total_size / (1024 * 1024)
-    await message.answer(t("cache.text", count=cache_size, size_mb=size_mb))
-
-
-@router.message(Command("clearcache"))
-async def cmd_clearcache(message: Message, t: Translator) -> None:
-    """Очищает кэш видео."""
-    count = downloader.clear_cache()
-    await message.answer(t("cache.cleared", count=count))

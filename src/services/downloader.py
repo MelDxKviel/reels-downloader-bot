@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -221,6 +222,7 @@ class VideoDownloader:
                 "file_path": result.file_path,
                 "title": result.title,
                 "duration": result.duration,
+                "cached_at": time.time(),
             }
             if result.is_photo:
                 new_entry["is_photo"] = True
@@ -234,6 +236,18 @@ class VideoDownloader:
                 new_entry["telegram_file_id"] = telegram_file_id
             self.cache[url_hash] = new_entry
             self._save_cache()
+
+    def _get_or_create_entry(self, url_hash: str) -> dict:
+        """Возвращает запись кэша по хэшу, создавая пустую с меткой времени.
+
+        Метка ``cached_at`` нужна автоочистке: записи только с file_id (без
+        файла на диске) иначе не имели бы определяемого возраста.
+        """
+        entry = self.cache.get(url_hash)
+        if entry is None:
+            entry = {"cached_at": time.time()}
+            self.cache[url_hash] = entry
+        return entry
 
     def get_telegram_file_id(self, url: str) -> Optional[str]:
         """Возвращает сохранённый Telegram file_id для URL, если есть."""
@@ -249,10 +263,7 @@ class VideoDownloader:
         if not file_id:
             return
         url_hash = get_url_hash(url)
-        entry = self.cache.get(url_hash)
-        if entry is None:
-            entry = {}
-            self.cache[url_hash] = entry
+        entry = self._get_or_create_entry(url_hash)
         if entry.get("telegram_file_id") == file_id:
             return
         entry["telegram_file_id"] = file_id
@@ -292,10 +303,7 @@ class VideoDownloader:
         if not file_id:
             return
         url_hash = get_url_hash(url)
-        entry = self.cache.get(url_hash)
-        if entry is None:
-            entry = {}
-            self.cache[url_hash] = entry
+        entry = self._get_or_create_entry(url_hash)
         if entry.get("telegram_photo_file_id") == file_id:
             return
         entry["telegram_photo_file_id"] = file_id
@@ -315,10 +323,7 @@ class VideoDownloader:
         if not file_id:
             return
         url_hash = get_url_hash(url)
-        entry = self.cache.get(url_hash)
-        if entry is None:
-            entry = {}
-            self.cache[url_hash] = entry
+        entry = self._get_or_create_entry(url_hash)
         if entry.get("telegram_mp3_file_id") == file_id:
             return
         entry["telegram_mp3_file_id"] = file_id
@@ -1402,26 +1407,89 @@ class VideoDownloader:
 
         return None
 
+    @staticmethod
+    def _entry_file_paths(data: dict) -> list[str]:
+        """Локальные файлы записи кэша (видео и/или фото) без дублей."""
+        paths: list[str] = []
+        file_path = data.get("file_path")
+        if isinstance(file_path, str):
+            paths.append(file_path)
+        photo_paths = data.get("photo_paths")
+        if isinstance(photo_paths, list):
+            for p in photo_paths:
+                if isinstance(p, str) and p not in paths:
+                    paths.append(p)
+        return paths
+
+    def _delete_entry_files(self, data: dict) -> int:
+        """Удаляет файлы записи кэша с диска. Возвращает число удалённых файлов."""
+        count = 0
+        for p in self._entry_file_paths(data):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                    count += 1
+                except OSError:
+                    pass
+        return count
+
+    def _entry_age_seconds(self, data: dict, now: float) -> Optional[float]:
+        """Возраст записи кэша в секундах.
+
+        Берётся из ``cached_at`` (время добавления в кэш); для старых записей
+        без этого поля — из mtime файла. ``None``, если возраст определить
+        нельзя (нет ни метки, ни существующего файла) — такие записи не трогаем.
+        """
+        cached_at = data.get("cached_at")
+        if isinstance(cached_at, (int, float)):
+            return max(0.0, now - float(cached_at))
+        for path in self._entry_file_paths(data):
+            if os.path.exists(path):
+                try:
+                    return max(0.0, now - os.path.getmtime(path))
+                except OSError:
+                    continue
+        return None
+
+    def cache_disk_usage(self) -> int:
+        """Суммарный размер существующих файлов кэша на диске (байты)."""
+        total = 0
+        for data in self.cache.values():
+            for path in self._entry_file_paths(data):
+                if os.path.exists(path):
+                    try:
+                        total += os.path.getsize(path)
+                    except OSError:
+                        pass
+        return total
+
+    def cleanup_expired(self, max_age_seconds: float) -> tuple[int, int]:
+        """Удаляет записи кэша старше ``max_age_seconds`` и их файлы.
+
+        Возвращает кортеж ``(удалено_записей, удалено_файлов)``. Записи с
+        неопределимым возрастом пропускаются (см. :meth:`_entry_age_seconds`).
+        """
+        if max_age_seconds <= 0:
+            return 0, 0
+        now = time.time()
+        removed_entries = 0
+        removed_files = 0
+        for url_hash, data in list(self.cache.items()):
+            age = self._entry_age_seconds(data, now)
+            if age is None or age < max_age_seconds:
+                continue
+            removed_files += self._delete_entry_files(data)
+            del self.cache[url_hash]
+            removed_entries += 1
+        if removed_entries:
+            self._save_cache()
+        return removed_entries, removed_files
+
     def clear_cache(self) -> int:
         """Очищает весь кэш и удаляет файлы. Возвращает количество удалённых файлов."""
         count = 0
         for data in list(self.cache.values()):
-            paths: list[str] = []
-            file_path = data.get("file_path")
-            if isinstance(file_path, str):
-                paths.append(file_path)
-            photo_paths = data.get("photo_paths")
-            if isinstance(photo_paths, list):
-                for p in photo_paths:
-                    if isinstance(p, str) and p not in paths:
-                        paths.append(p)
-            for p in paths:
-                if os.path.exists(p):
-                    try:
-                        os.remove(p)
-                        count += 1
-                    except OSError:
-                        pass
+            count += self._delete_entry_files(data)
         self.cache.clear()
         self._save_cache()
         return count

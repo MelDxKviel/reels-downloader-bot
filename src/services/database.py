@@ -15,6 +15,10 @@ from src.config import DATABASE_URL, DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES
 
 logger = logging.getLogger(__name__)
 
+# Ключи bot_settings для автоочистки кэша (key/value-настройки бота).
+SETTING_CACHE_AUTOCLEAN = "cache.autoclean.enabled"
+SETTING_CACHE_MAX_AGE_HOURS = "cache.autoclean.max_age_hours"
+
 
 def _utcnow() -> datetime:
     """Return a naive UTC datetime, replacing deprecated ``datetime.utcnow()``.
@@ -243,6 +247,34 @@ class DatabaseService:
     async def set_feature_enabled(self, name: str, enabled: bool) -> None:
         """Сохраняет включение/отключение фичи."""
         await self.set_setting(f"feature.{name}", "1" if enabled else "0")
+
+    # === Автоочистка кэша ===
+
+    async def get_cache_autoclean(self, default: bool = False) -> bool:
+        """Включена ли автоочистка кэша (значение из bot_settings)."""
+        stored = await self.get_setting(SETTING_CACHE_AUTOCLEAN)
+        if stored is None:
+            return default
+        return stored == "1"
+
+    async def set_cache_autoclean(self, enabled: bool) -> None:
+        """Сохраняет включение/отключение автоочистки кэша."""
+        await self.set_setting(SETTING_CACHE_AUTOCLEAN, "1" if enabled else "0")
+
+    async def get_cache_max_age_hours(self, default: int) -> int:
+        """Срок хранения записи кэша (часы) из bot_settings или ``default``."""
+        stored = await self.get_setting(SETTING_CACHE_MAX_AGE_HOURS)
+        if stored is None:
+            return default
+        try:
+            value = int(stored)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
+
+    async def set_cache_max_age_hours(self, hours: int) -> None:
+        """Сохраняет срок хранения записи кэша (часы)."""
+        await self.set_setting(SETTING_CACHE_MAX_AGE_HOURS, str(hours))
 
     # === Статистика ===
 

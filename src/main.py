@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import contextlib
 import logging
 import sys
 
@@ -17,8 +18,17 @@ from aiogram.types import (
 from src.bot.commands import admin_commands, user_commands
 from src.bot.handlers import get_main_router
 from src.bot.middlewares import DatabaseMiddleware, LocaleMiddleware, UserAccessMiddleware
-from src.config import ADMIN_USERS, BOT_TOKEN, DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES
+from src.config import (
+    ADMIN_USERS,
+    BOT_TOKEN,
+    CACHE_AUTOCLEAN_DEFAULT,
+    CACHE_CLEANUP_INTERVAL,
+    CACHE_MAX_AGE_HOURS,
+    DEFAULT_LANGUAGE,
+    SUPPORTED_LANGUAGES,
+)
 from src.services.database import DatabaseService
+from src.services.downloader import downloader
 from src.services.i18n import Translator
 
 # Настройка логирования
@@ -65,6 +75,38 @@ async def _setup_bot_commands(bot: Bot, db: DatabaseService) -> None:
                 )
     except Exception as e:
         logger.warning(f"⚠️ Не удалось зарегистрировать команды бота: {e}")
+
+
+async def _cache_cleanup_loop(db: DatabaseService) -> None:
+    """Фоновая автоочистка кэша: периодически удаляет устаревшие записи.
+
+    Каждые ``CACHE_CLEANUP_INTERVAL`` секунд перечитывает настройку из БД, так
+    что включение/выключение и смена срока хранения из админки (/cache)
+    подхватываются без рестарта. Файловые операции выполняются в executor,
+    чтобы не блокировать event loop.
+    """
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(CACHE_CLEANUP_INTERVAL)
+        try:
+            if not await db.get_cache_autoclean(CACHE_AUTOCLEAN_DEFAULT):
+                continue
+            max_age_hours = await db.get_cache_max_age_hours(CACHE_MAX_AGE_HOURS)
+            max_age_seconds = max_age_hours * 3600
+            entries, files = await loop.run_in_executor(
+                None, lambda: downloader.cleanup_expired(max_age_seconds)
+            )
+            if entries:
+                logger.info(
+                    "♻️ Автоочистка кэша: удалено записей=%s, файлов=%s (старше %s ч)",
+                    entries,
+                    files,
+                    max_age_hours,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("⚠️ Ошибка автоочистки кэша: %s", e)
 
 
 async def main() -> None:
@@ -120,12 +162,18 @@ async def main() -> None:
 
     await _setup_bot_commands(bot, db)
 
+    # Фоновая автоочистка кэша (срабатывает, только если включена в /cache).
+    cleanup_task = asyncio.create_task(_cache_cleanup_loop(db))
+
     # Запускаем бота
     logger.info("🚀 Бот запущен!")
 
     try:
         await dp.start_polling(bot)
     finally:
+        cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_task
         await bot.session.close()
         await db.close()
 

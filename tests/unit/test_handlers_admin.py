@@ -660,3 +660,133 @@ async def test_cb_feature_toggle_whitelist_off_when_default_on():
         await adm.cb_feature_toggle(cb, db, Translator("en"))
     db.set_feature_enabled.assert_awaited_with("whitelist", False)
     cb.answer.assert_awaited()
+
+
+# ── /cache command + auto-clean controls ─────────────────────────────────────
+
+
+def test_format_max_age_hours_and_days():
+    t = Translator("en")
+    assert "6" in adm._format_max_age(6, t)
+    # 24h is a whole day → rendered via the "days" key.
+    assert adm._format_max_age(24, t) == t("cache.age.days", value=1)
+
+
+def test_next_max_age_cycles_through_presets():
+    assert adm._next_max_age(6) == 12
+    assert adm._next_max_age(24) == 72
+    # Last preset wraps back to the first.
+    assert adm._next_max_age(adm.CACHE_MAX_AGE_PRESETS[-1]) == adm.CACHE_MAX_AGE_PRESETS[0]
+    # A custom (non-preset) value jumps to the next greater preset.
+    assert adm._next_max_age(100) == 168
+
+
+@pytest.mark.asyncio
+async def test_cmd_cache_denied_for_non_admin():
+    msg = make_message("/cache", user_id=999)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cmd_cache(msg, db, Translator("en"))
+    msg.answer.assert_awaited_once()
+    db.get_cache_autoclean.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmd_cache_shows_view_with_keyboard():
+    msg = make_message("/cache", user_id=1)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        with patch.object(adm.downloader, "cache", {}):
+            with patch.object(adm.downloader, "cache_disk_usage", return_value=0):
+                await adm.cmd_cache(msg, db, Translator("en"))
+    kwargs = msg.answer.await_args.kwargs
+    assert "reply_markup" in kwargs
+    assert kwargs["reply_markup"].inline_keyboard
+
+
+@pytest.mark.asyncio
+async def test_cmd_clearcache_denied_for_non_admin():
+    msg = make_message("/clearcache", user_id=999)
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        with patch.object(adm.downloader, "clear_cache") as mock_clear:
+            await adm.cmd_clearcache(msg, Translator("en"))
+    mock_clear.assert_not_called()
+    msg.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cmd_clearcache_reports_count():
+    msg = make_message("/clearcache", user_id=1)
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        with patch.object(adm.downloader, "clear_cache", return_value=7):
+            await adm.cmd_clearcache(msg, Translator("en"))
+    text = msg.answer.await_args.args[0]
+    assert "7" in text
+
+
+@pytest.mark.asyncio
+async def test_cb_cache_clear_denied_non_admin():
+    cb = make_callback("cache_clear", user_id=999)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        with patch.object(adm.downloader, "clear_cache") as mock_clear:
+            await adm.cb_cache_clear(cb, db, Translator("en"))
+    mock_clear.assert_not_called()
+    cb.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cb_cache_clear_clears_and_refreshes():
+    cb = make_callback("cache_clear", user_id=1)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        with patch.object(adm.downloader, "cache", {}):
+            with patch.object(adm.downloader, "cache_disk_usage", return_value=0):
+                with patch.object(adm.downloader, "clear_cache", return_value=3):
+                    await adm.cb_cache_clear(cb, db, Translator("en"))
+    cb.message.edit_text.assert_awaited()
+    cb.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cb_cache_autoclean_toggle_flips_value():
+    cb = make_callback("cache_autoclean", user_id=1)
+    db = make_db()
+    db.get_cache_autoclean.return_value = False
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        with patch.object(adm.downloader, "cache", {}):
+            with patch.object(adm.downloader, "cache_disk_usage", return_value=0):
+                await adm.cb_cache_autoclean_toggle(cb, db, Translator("en"))
+    db.set_cache_autoclean.assert_awaited_with(True)
+    cb.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cb_cache_autoclean_toggle_denied_non_admin():
+    cb = make_callback("cache_autoclean", user_id=999)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cb_cache_autoclean_toggle(cb, db, Translator("en"))
+    db.set_cache_autoclean.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cb_cache_age_cycle_advances_preset():
+    cb = make_callback("cache_age", user_id=1)
+    db = make_db()
+    db.get_cache_max_age_hours.return_value = 24
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        with patch.object(adm.downloader, "cache", {}):
+            with patch.object(adm.downloader, "cache_disk_usage", return_value=0):
+                await adm.cb_cache_age_cycle(cb, db, Translator("en"))
+    db.set_cache_max_age_hours.assert_awaited_with(72)  # 24h → next preset
+    cb.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cb_cache_age_cycle_denied_non_admin():
+    cb = make_callback("cache_age", user_id=999)
+    db = make_db()
+    with patch("src.bot.handlers.admin.ADMIN_USERS", [1]):
+        await adm.cb_cache_age_cycle(cb, db, Translator("en"))
+    db.set_cache_max_age_hours.assert_not_called()

@@ -2,6 +2,8 @@
 Tests for VideoDownloader: cache operations, cookie validation, yt-dlp integration.
 """
 
+import os
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -118,6 +120,98 @@ def test_clear_cache_removes_files_and_entries(tmp_path):
 def test_clear_cache_returns_0_when_empty(tmp_path):
     d = make_downloader(tmp_path)
     assert d.clear_cache() == 0
+
+
+# ── cache: cleanup_expired (auto-clean) ───────────────────────────────────────
+
+
+def test_add_to_cache_records_cached_at(tmp_path):
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path)
+    url = "https://youtube.com/watch?v=ts"
+    d.add_to_cache(url, DownloadResult(success=True, file_path=str(video), title="T"))
+    entry = d.cache[d._get_url_hash(url)]
+    assert isinstance(entry.get("cached_at"), float)
+
+
+def test_set_telegram_file_id_new_entry_records_cached_at(tmp_path):
+    d = make_downloader(tmp_path)
+    url = "https://youtube.com/watch?v=fid"
+    d.set_telegram_file_id(url, "abc")
+    entry = d.cache[d._get_url_hash(url)]
+    assert "cached_at" in entry
+
+
+def test_cache_disk_usage_sums_existing_files(tmp_path):
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path, "v.mp4", size=2048)
+    d.add_to_cache(
+        "https://youtube.com/watch?v=sz",
+        DownloadResult(success=True, file_path=str(video), title="S"),
+    )
+    assert d.cache_disk_usage() == 2048
+
+
+def test_cleanup_expired_removes_old_keeps_fresh(tmp_path):
+    d = make_downloader(tmp_path)
+    old = fake_video(tmp_path, "old.mp4")
+    new = fake_video(tmp_path, "new.mp4")
+    d.add_to_cache(
+        "https://youtube.com/watch?v=old",
+        DownloadResult(success=True, file_path=str(old), title="O"),
+    )
+    d.add_to_cache(
+        "https://youtube.com/watch?v=new",
+        DownloadResult(success=True, file_path=str(new), title="N"),
+    )
+    old_hash = d._get_url_hash("https://youtube.com/watch?v=old")
+    d.cache[old_hash]["cached_at"] = time.time() - 10 * 3600  # backdate 10h
+
+    entries, files = d.cleanup_expired(max_age_seconds=3600)  # 1h threshold
+
+    assert entries == 1
+    assert files == 1
+    assert not old.exists()
+    assert new.exists()
+    assert old_hash not in d.cache
+
+
+def test_cleanup_expired_uses_file_mtime_for_legacy_entries(tmp_path):
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path)
+    url_hash = d._get_url_hash("https://youtube.com/watch?v=legacy")
+    d.cache[url_hash] = {"file_path": str(video), "title": "L"}  # no cached_at
+    old = time.time() - 10 * 3600
+    os.utime(video, (old, old))
+
+    entries, files = d.cleanup_expired(max_age_seconds=3600)
+
+    assert entries == 1
+    assert files == 1
+    assert url_hash not in d.cache
+
+
+def test_cleanup_expired_skips_unknown_age(tmp_path):
+    d = make_downloader(tmp_path)
+    url_hash = d._get_url_hash("https://youtube.com/watch?v=fileidonly")
+    # file_id-only legacy entry: no cached_at, no file on disk → age unknown.
+    d.cache[url_hash] = {"telegram_file_id": "abc"}
+
+    entries, files = d.cleanup_expired(max_age_seconds=3600)
+
+    assert entries == 0
+    assert url_hash in d.cache
+
+
+def test_cleanup_expired_zero_age_is_noop(tmp_path):
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path)
+    d.add_to_cache(
+        "https://youtube.com/watch?v=x",
+        DownloadResult(success=True, file_path=str(video), title="X"),
+    )
+    assert d.cleanup_expired(0) == (0, 0)
+    assert video.exists()
 
 
 # ── netscape cookie validation ────────────────────────────────────────────────
