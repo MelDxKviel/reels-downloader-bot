@@ -19,7 +19,16 @@ def test_admin_commands_extends_user_commands():
     admin = admin_commands(Translator("en"))
     assert len(admin) > len(user)
     admin_names = [c.command for c in admin]
-    for extra in ("adduser", "removeuser", "users", "stats", "userstats", "adminhelp"):
+    for extra in (
+        "adduser",
+        "removeuser",
+        "users",
+        "stats",
+        "userstats",
+        "cache",
+        "clearcache",
+        "adminhelp",
+    ):
         assert extra in admin_names
 
 

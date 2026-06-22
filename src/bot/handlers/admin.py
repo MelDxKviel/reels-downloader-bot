@@ -2,6 +2,7 @@
 Команды администратора: управление пользователями и статистика.
 """
 
+import asyncio
 import html
 import logging
 from datetime import timedelta
@@ -18,8 +19,14 @@ from aiogram.types import (
     Message,
 )
 
-from src.config import ADMIN_USERS
+from src.config import (
+    ADMIN_USERS,
+    CACHE_AUTOCLEAN_DEFAULT,
+    CACHE_MAX_AGE_HOURS,
+    CACHE_MAX_AGE_PRESETS,
+)
 from src.services.database import DatabaseService, _utcnow
+from src.services.downloader import downloader
 from src.services.i18n import Translator
 
 logger = logging.getLogger(__name__)
@@ -411,6 +418,127 @@ async def cb_feature_toggle(callback: CallbackQuery, db: DatabaseService, t: Tra
     await callback.answer(
         t("admin.features.toggle_ack", name=t(f"admin.features.flag.{flag}"), state=new_state)
     )
+
+
+# ── /cache: информация о кэше + управление автоочисткой ──────────────────────
+
+
+def _format_max_age(hours: int, t: Translator) -> str:
+    """Человекочитаемый срок хранения: дни, если кратно 24, иначе часы."""
+    if hours % 24 == 0:
+        return t("cache.age.days", value=hours // 24)
+    return t("cache.age.hours", value=hours)
+
+
+def _next_max_age(current: int) -> int:
+    """Следующий пресет срока хранения (циклически)."""
+    for preset in CACHE_MAX_AGE_PRESETS:
+        if preset > current:
+            return preset
+    return CACHE_MAX_AGE_PRESETS[0]
+
+
+async def _build_cache_view(db: DatabaseService, t: Translator) -> Tuple[str, InlineKeyboardMarkup]:
+    """Собирает текст и клавиатуру для /cache (статистика + настройки автоочистки)."""
+    count = len(downloader.cache)
+    size_mb = downloader.cache_disk_usage() / (1024 * 1024)
+    enabled = await db.get_cache_autoclean(CACHE_AUTOCLEAN_DEFAULT)
+    max_age_hours = await db.get_cache_max_age_hours(CACHE_MAX_AGE_HOURS)
+    max_age_label = _format_max_age(max_age_hours, t)
+
+    text = t(
+        "cache.text",
+        count=count,
+        size_mb=size_mb,
+        autoclean=t("cache.autoclean_on" if enabled else "cache.autoclean_off"),
+        max_age=max_age_label,
+    )
+    toggle_key = "cache.button_autoclean_disable" if enabled else "cache.button_autoclean_enable"
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("cache.button_clear"), callback_data="cache_clear")],
+            [InlineKeyboardButton(text=t(toggle_key), callback_data="cache_autoclean")],
+            [
+                InlineKeyboardButton(
+                    text=t("cache.button_max_age", age=max_age_label),
+                    callback_data="cache_age",
+                )
+            ],
+        ]
+    )
+    return text, keyboard
+
+
+async def _refresh_cache_view(callback: CallbackQuery, db: DatabaseService, t: Translator) -> None:
+    """Перерисовывает сообщение /cache после действия (молча игнорируя отказ Telegram)."""
+    text, keyboard = await _build_cache_view(db, t)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception as e:
+        logger.debug("Не удалось обновить /cache сообщение: %s", e)
+
+
+@router.message(Command("cache"))
+async def cmd_cache(message: Message, db: DatabaseService, t: Translator) -> None:
+    """Показывает информацию о кэше и управление автоочисткой."""
+    if not is_admin(message.from_user.id):
+        await message.answer(t("admin.only"))
+        return
+
+    text, keyboard = await _build_cache_view(db, t)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@router.message(Command("clearcache"))
+async def cmd_clearcache(message: Message, t: Translator) -> None:
+    """Очищает кэш видео (только администратор)."""
+    if not is_admin(message.from_user.id):
+        await message.answer(t("admin.only"))
+        return
+
+    loop = asyncio.get_event_loop()
+    count = await loop.run_in_executor(None, downloader.clear_cache)
+    await message.answer(t("cache.cleared", count=count))
+
+
+@router.callback_query(F.data == "cache_clear")
+async def cb_cache_clear(callback: CallbackQuery, db: DatabaseService, t: Translator) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t("common.access_denied_callback"), show_alert=True)
+        return
+
+    loop = asyncio.get_event_loop()
+    count = await loop.run_in_executor(None, downloader.clear_cache)
+    await _refresh_cache_view(callback, db, t)
+    await callback.answer(t("cache.cleared_alert", count=count))
+
+
+@router.callback_query(F.data == "cache_autoclean")
+async def cb_cache_autoclean_toggle(
+    callback: CallbackQuery, db: DatabaseService, t: Translator
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t("common.access_denied_callback"), show_alert=True)
+        return
+
+    current = await db.get_cache_autoclean(CACHE_AUTOCLEAN_DEFAULT)
+    await db.set_cache_autoclean(not current)
+    await _refresh_cache_view(callback, db, t)
+    new_label = t("cache.autoclean_on" if not current else "cache.autoclean_off")
+    await callback.answer(t("cache.autoclean_toggled", state=new_label))
+
+
+@router.callback_query(F.data == "cache_age")
+async def cb_cache_age_cycle(callback: CallbackQuery, db: DatabaseService, t: Translator) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer(t("common.access_denied_callback"), show_alert=True)
+        return
+
+    current = await db.get_cache_max_age_hours(CACHE_MAX_AGE_HOURS)
+    next_age = _next_max_age(current)
+    await db.set_cache_max_age_hours(next_age)
+    await _refresh_cache_view(callback, db, t)
+    await callback.answer(t("cache.max_age_changed", age=_format_max_age(next_age, t)))
 
 
 @router.callback_query(F.data.startswith("cancel_admin:"))

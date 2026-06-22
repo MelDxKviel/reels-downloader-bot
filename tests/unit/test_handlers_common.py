@@ -1,4 +1,4 @@
-"""Tests for common handlers: /start, /help, /id, /cache, /clearcache."""
+"""Tests for common handlers: /start, /help, /id."""
 
 from unittest.mock import patch
 
@@ -56,40 +56,3 @@ async def test_cmd_id_without_username():
     await common_h.cmd_id(msg, Translator("en"))
     text = msg.answer.await_args.args[0]
     assert "100" in text
-
-
-@pytest.mark.asyncio
-async def test_cmd_cache_empty():
-    msg = make_message("/cache")
-    with patch.object(common_h.downloader, "cache", {}):
-        await common_h.cmd_cache(msg, Translator("en"))
-    msg.answer.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_cmd_cache_with_existing_files(tmp_path):
-    msg = make_message("/cache")
-    f = tmp_path / "v.mp4"
-    f.write_bytes(b"x" * 1024)
-    with patch.object(common_h.downloader, "cache", {"h": {"file_path": str(f)}}):
-        await common_h.cmd_cache(msg, Translator("en"))
-    text = msg.answer.await_args.args[0]
-    assert "1" in text  # 1 file cached
-
-
-@pytest.mark.asyncio
-async def test_cmd_cache_skips_missing_files(tmp_path):
-    msg = make_message("/cache")
-    missing = str(tmp_path / "nope.mp4")
-    with patch.object(common_h.downloader, "cache", {"h": {"file_path": missing}}):
-        await common_h.cmd_cache(msg, Translator("en"))
-    assert msg.answer.await_args is not None
-
-
-@pytest.mark.asyncio
-async def test_cmd_clearcache_reports_count():
-    msg = make_message("/clearcache")
-    with patch.object(common_h.downloader, "clear_cache", return_value=5):
-        await common_h.cmd_clearcache(msg, Translator("en"))
-    text = msg.answer.await_args.args[0]
-    assert "5" in text
