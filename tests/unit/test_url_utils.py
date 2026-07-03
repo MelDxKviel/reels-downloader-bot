@@ -293,6 +293,23 @@ def test_should_retry_with_kkinstagram_false_for_unrelated_error():
     assert should_retry_with_kkinstagram(url, "network timeout") is False
 
 
+def test_should_retry_with_kkinstagram_on_empty_media_response():
+    """Реальное сообщение yt-dlp, когда Instagram блокирует анонимный запрос."""
+    url = "https://www.instagram.com/reel/abc/"
+    error = (
+        "error: [instagram] datyteisky4: instagram sent an empty media response. "
+        "check if this post is accessible in your browser without being logged-in. "
+        "if it is not, then use --cookies-from-browser or --cookies for the authentication"
+    )
+    assert should_retry_with_kkinstagram(url, error) is True
+
+
+def test_should_retry_with_kkinstagram_on_rate_limit():
+    url = "https://www.instagram.com/reel/abc/"
+    error = "requested content is not available, rate-limit reached or login required"
+    assert should_retry_with_kkinstagram(url, error) is True
+
+
 # --- is_instagram_post_url ---
 
 
