@@ -21,6 +21,12 @@ _SUPPORTED_HOSTS = frozenset(
     }
 )
 
+# Маркеры ошибок yt-dlp, означающих, что Instagram заблокировал анонимный
+# доступ (нужна авторизация, кончился лимит запросов или IP в чёрном списке).
+# Все они лечатся одинаково — повтором через зеркало kkinstagram, поэтому
+# сюда входят не только явные auth-ошибки, но и "empty media response" /
+# "rate-limit reached": так yt-dlp сообщает, что Instagram вернул пустой
+# ответ анонимному запросу (частый случай для датацентровых IP).
 INSTAGRAM_AUTH_ERROR_MARKERS = (
     "sign in",
     "login",
@@ -30,6 +36,9 @@ INSTAGRAM_AUTH_ERROR_MARKERS = (
     "not logged in",
     "consent_required",
     "checkpoint_required",
+    "empty media response",
+    "rate-limit reached",
+    "rate limit reached",
 )
 
 # URL pattern shared by all text/inline handlers. The lookahead after the
