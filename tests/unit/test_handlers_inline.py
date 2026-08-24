@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramServerError
 
 from src.bot.handlers import inline as inline_h
 from src.services.downloader import DownloadResult
@@ -40,6 +41,20 @@ async def test_inline_query_empty_text_returns_hint():
     q = make_inline_query("")
     await inline_h.inline_query_handler(q, make_db(), Translator("en"))
     q.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inline_query_answer_retries_telegram_504():
+    q = make_inline_query("")
+    q.answer.side_effect = [
+        TelegramServerError(method=MagicMock(), message="Gateway Timeout (504)"),
+        None,
+    ]
+    with patch("src.bot.telegram_retry.asyncio.sleep", AsyncMock()) as sleep:
+        await inline_h.inline_query_handler(q, make_db(), Translator("en"))
+
+    assert q.answer.await_count == 2
+    sleep.assert_awaited_once_with(1.0)
 
 
 @pytest.mark.asyncio
@@ -322,10 +337,14 @@ async def test_chosen_inline_download_failed_result():
     cr = make_chosen_result("download:abc", "https://youtube.com/watch?v=x")
     bot = make_bot()
     db = make_db()
-    result = DownloadResult(success=False, error="x")
+    result = DownloadResult(success=False, error="SECRET_YTDLP_LOG HTTP 504 <raw>")
     with patch.object(inline_h.downloader, "download", AsyncMock(return_value=result)):
         await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
     db.record_download.assert_awaited()
+    text = bot.edit_message_text.await_args.kwargs["text"]
+    assert text == "❌ <b>Failed to load</b>"
+    assert "SECRET_YTDLP_LOG" not in text
+    assert "504" not in text
 
 
 @pytest.mark.asyncio
@@ -335,11 +354,42 @@ async def test_chosen_inline_download_video_success(tmp_path):
     db = make_db()
     video = tmp_path / "v.mp4"
     video.write_bytes(b"x")
-    result = DownloadResult(success=True, file_path=str(video))
+    result = DownloadResult(
+        success=True, file_path=str(video), duration=9.0, width=720, height=1280
+    )
+    upload = AsyncMock(return_value="fid")
     with patch.object(inline_h.downloader, "download", AsyncMock(return_value=result)):
-        with patch.object(inline_h, "_upload_video_and_get_file_id", AsyncMock(return_value="fid")):
+        with patch.object(inline_h, "_upload_video_and_get_file_id", upload):
             await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
     bot.edit_message_media.assert_awaited()
+    upload.assert_awaited_once_with(bot, str(video), width=720, height=1280, duration=9.0)
+    media = bot.edit_message_media.await_args.kwargs["media"]
+    assert (media.width, media.height, media.duration) == (720, 1280, 9)
+    assert not video.exists()
+
+
+@pytest.mark.asyncio
+async def test_chosen_inline_video_edit_retries_telegram_504(tmp_path):
+    cr = make_chosen_result("download:abc", "https://youtube.com/watch?v=x")
+    bot = make_bot()
+    bot.edit_message_media.side_effect = [
+        TelegramServerError(method=MagicMock(), message="Gateway Timeout (504)"),
+        None,
+    ]
+    db = make_db()
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    result = DownloadResult(success=True, file_path=str(video), width=720, height=1280)
+    with (
+        patch.object(inline_h.downloader, "download", AsyncMock(return_value=result)),
+        patch.object(inline_h, "_upload_video_and_get_file_id", AsyncMock(return_value="fid")),
+        patch("src.bot.telegram_retry.asyncio.sleep", AsyncMock()) as sleep,
+    ):
+        await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
+
+    assert bot.edit_message_media.await_count == 2
+    sleep.assert_awaited_once_with(1.0)
+    assert db.record_download.await_args.kwargs["success"] is True
 
 
 @pytest.mark.asyncio
@@ -551,6 +601,46 @@ async def test_upload_video_send_fails():
 
 
 @pytest.mark.asyncio
+async def test_upload_video_retries_telegram_504_then_succeeds():
+    bot = make_bot()
+    staging = MagicMock()
+    staging.video = MagicMock()
+    staging.video.file_id = "fid"
+    staging.message_id = 1
+    error = TelegramServerError(method=MagicMock(), message="Gateway Timeout (504)")
+    bot.send_video.side_effect = [error, staging]
+
+    with (
+        patch("src.bot.handlers.inline._resolve_storage_chat_id", return_value=42),
+        patch("src.bot.telegram_retry.asyncio.sleep", AsyncMock()) as sleep,
+    ):
+        result = await inline_h._upload_video_and_get_file_id(bot, "/tmp/x.mp4")
+
+    assert result == "fid"
+    assert bot.send_video.await_count == 2
+    sleep.assert_awaited_once_with(1.0)
+    bot.delete_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_upload_video_stops_after_three_telegram_504_responses():
+    bot = make_bot()
+    bot.send_video.side_effect = [
+        TelegramServerError(method=MagicMock(), message="Gateway Timeout (504)") for _ in range(3)
+    ]
+
+    with (
+        patch("src.bot.handlers.inline._resolve_storage_chat_id", return_value=42),
+        patch("src.bot.telegram_retry.asyncio.sleep", AsyncMock()) as sleep,
+    ):
+        result = await inline_h._upload_video_and_get_file_id(bot, "/tmp/x.mp4")
+
+    assert result is None
+    assert bot.send_video.await_count == 3
+    assert sleep.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_upload_video_success():
     bot = make_bot()
     staging = MagicMock()
@@ -559,8 +649,13 @@ async def test_upload_video_success():
     staging.message_id = 1
     bot.send_video.return_value = staging
     with patch("src.bot.handlers.inline._resolve_storage_chat_id", return_value=42):
-        result = await inline_h._upload_video_and_get_file_id(bot, "/tmp/x.mp4")
+        result = await inline_h._upload_video_and_get_file_id(
+            bot, "/tmp/x.mp4", width=720, height=1280, duration=4.2
+        )
     assert result == "fid"
+    kwargs = bot.send_video.await_args.kwargs
+    assert (kwargs["width"], kwargs["height"], kwargs["duration"]) == (720, 1280, 4)
+    assert kwargs["request_timeout"] == 180
 
 
 @pytest.mark.asyncio

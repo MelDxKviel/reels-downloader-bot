@@ -18,6 +18,11 @@ from aiogram.types import (
     Message,
 )
 
+from src.bot.telegram_retry import (
+    TELEGRAM_UPLOAD_TIMEOUT,
+    retry_transient_telegram,
+    telegram_duration,
+)
 from src.services.database import DatabaseService
 from src.services.downloader import DownloadResult, downloader
 from src.services.i18n import Translator, translate_download_error
@@ -85,13 +90,32 @@ async def _download_and_send(
         if result.is_photo:
             photo_paths = result.photo_paths or [result.file_path]
             if len(photo_paths) > 1:
-                media = [InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths]
-                await message.answer_media_group(media=media)
+                await retry_transient_telegram(
+                    lambda: message.answer_media_group(
+                        media=[InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths],
+                        request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                    ),
+                    "sendMediaGroup(user)",
+                )
             else:
-                await message.answer_photo(photo=FSInputFile(photo_paths[0]))
+                await retry_transient_telegram(
+                    lambda: message.answer_photo(
+                        photo=FSInputFile(photo_paths[0]),
+                        request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                    ),
+                    "sendPhoto(user)",
+                )
         else:
-            sent = await message.answer_video(
-                video=FSInputFile(result.file_path), supports_streaming=True
+            sent = await retry_transient_telegram(
+                lambda: message.answer_video(
+                    video=FSInputFile(result.file_path),
+                    duration=telegram_duration(result.duration),
+                    width=result.width,
+                    height=result.height,
+                    supports_streaming=True,
+                    request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                ),
+                "sendVideo(user)",
             )
             if sent.video and sent.video.file_id:
                 downloader.set_telegram_file_id(url, sent.video.file_id)

@@ -45,10 +45,15 @@ from aiogram.types import (
     InputTextMessageContent,
 )
 
+from src.bot.telegram_retry import (
+    TELEGRAM_UPLOAD_TIMEOUT,
+    retry_transient_telegram,
+    telegram_duration,
+)
 from src.config import ADMIN_USERS, VIDEO_STORAGE_CHAT_ID
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
-from src.services.i18n import Translator, translate_download_error
+from src.services.i18n import Translator
 from src.services.url_utils import extract_url, get_url_hash
 from src.services.youtube_search import (
     build_shorts_url,
@@ -80,13 +85,21 @@ def _extract_url(text: Optional[str]) -> Optional[str]:
     return extract_url(text)
 
 
+async def _answer_inline(query: InlineQuery, **kwargs: object) -> None:
+    await retry_transient_telegram(
+        lambda: query.answer(**kwargs),
+        "answerInlineQuery",
+    )
+
+
 @router.inline_query()
 async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Translator) -> None:
     """Формирует inline-результаты по введённому тексту (видео, кружок, MP3)."""
     text = (query.query or "").strip()
 
     if not text:
-        await query.answer(
+        await _answer_inline(
+            query,
             results=[
                 InlineQueryResultArticle(
                     id="hint",
@@ -122,7 +135,8 @@ async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Trans
             await _answer_shorts_search(query, text, t)
             return
 
-        await query.answer(
+        await _answer_inline(
+            query,
             results=[
                 InlineQueryResultArticle(
                     id="invalid",
@@ -206,7 +220,7 @@ async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Trans
             )
         )
 
-    await query.answer(results=results, cache_time=1, is_personal=True)
+    await _answer_inline(query, results=results, cache_time=1, is_personal=True)
 
 
 async def _answer_shorts_search(query: InlineQuery, text: str, t: Translator) -> None:
@@ -218,7 +232,8 @@ async def _answer_shorts_search(query: InlineQuery, text: str, t: Translator) ->
         shorts = []
 
     if not shorts:
-        await query.answer(
+        await _answer_inline(
+            query,
             results=[
                 InlineQueryResultArticle(
                     id="shorts_empty",
@@ -272,7 +287,7 @@ async def _answer_shorts_search(query: InlineQuery, text: str, t: Translator) ->
             )
         )
 
-    await query.answer(results=results, cache_time=30, is_personal=True)
+    await _answer_inline(query, results=results, cache_time=30, is_personal=True)
 
 
 def _format_duration(seconds: float) -> str:
@@ -361,40 +376,56 @@ async def chosen_inline_handler(
         result = await downloader.download(url, allow_carousel=False)
     except Exception as e:
         logger.error("Ошибка скачивания (inline): %s", e, exc_info=True)
-        await _safe_edit_text(bot, inline_message_id, t("inline.error.generic"))
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
     if not result.success or not result.file_path:
-        reason = html.escape(translate_download_error(t, result))
-        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed", reason=reason))
+        logger.warning("Inline download failed for %s: %s", url, result.error or result.error_code)
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
-    if operation == "download" or operation == "s":
-        if result.is_photo:
-            # В inline Telegram не умеет редактировать сообщение в media group,
-            # поэтому для карусели отправляется только первый слайд.
-            await _handle_photo(
-                bot, db, inline_message_id, url, platform, user_id, result.file_path, t
-            )
-        else:
-            await _handle_video(
-                bot, db, inline_message_id, url, platform, user_id, result.file_path, t
-            )
+    try:
+        if operation == "download" or operation == "s":
+            if result.is_photo:
+                # В inline Telegram не умеет редактировать сообщение в media group,
+                # поэтому для карусели отправляется только первый слайд.
+                await _handle_photo(
+                    bot, db, inline_message_id, url, platform, user_id, result.file_path, t
+                )
+            else:
+                await _handle_video(
+                    bot,
+                    db,
+                    inline_message_id,
+                    url,
+                    platform,
+                    user_id,
+                    result.file_path,
+                    t,
+                    width=result.width,
+                    height=result.height,
+                    duration=result.duration,
+                )
 
-    elif operation == "mp3":
-        await _handle_mp3(
-            bot,
-            db,
-            inline_message_id,
-            url,
-            platform,
-            user_id,
-            result.file_path,
-            result.title,
-            t,
-        )
+        elif operation == "mp3":
+            await _handle_mp3(
+                bot,
+                db,
+                inline_message_id,
+                url,
+                platform,
+                user_id,
+                result.file_path,
+                result.title,
+                t,
+            )
+    finally:
+        # Inline downloads intentionally bypass the shared cache. Once Telegram
+        # has a reusable file_id (or the operation failed), the source file must
+        # be removed explicitly or it would never be reached by cache cleanup.
+        downloader.discard_result_files(result)
 
 
 async def _handle_video(
@@ -406,25 +437,40 @@ async def _handle_video(
     user_id: int,
     file_path: str,
     t: Translator,
+    *,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    duration: Optional[float] = None,
 ) -> None:
     """Загружает видео в storage и подменяет inline-заглушку."""
-    file_id = await _upload_video_and_get_file_id(bot, file_path)
+    file_id = await _upload_video_and_get_file_id(
+        bot, file_path, width=width, height=height, duration=duration
+    )
     if not file_id:
-        await _safe_edit_text(bot, inline_message_id, t("inline.error.publish_video"))
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
     downloader.set_telegram_file_id(url, file_id)
 
     try:
-        await bot.edit_message_media(
-            inline_message_id=inline_message_id,
-            media=InputMediaVideo(media=file_id, supports_streaming=True),
-            reply_markup=None,
+        await retry_transient_telegram(
+            lambda: bot.edit_message_media(
+                inline_message_id=inline_message_id,
+                media=InputMediaVideo(
+                    media=file_id,
+                    supports_streaming=True,
+                    width=width,
+                    height=height,
+                    duration=telegram_duration(duration),
+                ),
+                reply_markup=None,
+            ),
+            "editMessageMedia(video)",
         )
     except Exception as e:
         logger.error("Ошибка при editMessageMedia (видео, inline): %s", e, exc_info=True)
-        await _safe_edit_text(bot, inline_message_id, t("inline.error.send"))
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -444,21 +490,24 @@ async def _handle_photo(
     """Загружает фото в storage и подменяет inline-заглушку."""
     file_id = await _upload_photo_and_get_file_id(bot, file_path)
     if not file_id:
-        await _safe_edit_text(bot, inline_message_id, t("inline.error.publish_photo"))
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
     downloader.set_telegram_photo_file_id(url, file_id)
 
     try:
-        await bot.edit_message_media(
-            inline_message_id=inline_message_id,
-            media=InputMediaPhoto(media=file_id),
-            reply_markup=None,
+        await retry_transient_telegram(
+            lambda: bot.edit_message_media(
+                inline_message_id=inline_message_id,
+                media=InputMediaPhoto(media=file_id),
+                reply_markup=None,
+            ),
+            "editMessageMedia(photo)",
         )
     except Exception as e:
         logger.error("Ошибка при editMessageMedia (фото, inline): %s", e, exc_info=True)
-        await _safe_edit_text(bot, inline_message_id, t("inline.error.send"))
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -485,7 +534,7 @@ async def _handle_mp3(
         logger.error("Ошибка конвертации в MP3 (inline): %s", e, exc_info=True)
 
     if not mp3_path:
-        await _safe_edit_text(bot, inline_message_id, t("inline.error.mp3_convert"))
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -498,21 +547,24 @@ async def _handle_mp3(
             pass
 
     if not file_id:
-        await _safe_edit_text(bot, inline_message_id, t("inline.error.publish_mp3"))
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
     downloader.set_telegram_mp3_file_id(url, file_id)
 
     try:
-        await bot.edit_message_media(
-            inline_message_id=inline_message_id,
-            media=InputMediaAudio(media=file_id),
-            reply_markup=None,
+        await retry_transient_telegram(
+            lambda: bot.edit_message_media(
+                inline_message_id=inline_message_id,
+                media=InputMediaAudio(media=file_id),
+                reply_markup=None,
+            ),
+            "editMessageMedia(audio)",
         )
     except Exception as e:
         logger.error("Ошибка при editMessageMedia (MP3, inline): %s", e, exc_info=True)
-        await _safe_edit_text(bot, inline_message_id, t("inline.error.send_mp3"))
+        await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
@@ -522,11 +574,14 @@ async def _handle_mp3(
 
 async def _safe_edit_text(bot: Bot, inline_message_id: str, text: str) -> None:
     try:
-        await bot.edit_message_text(
-            inline_message_id=inline_message_id,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=None,
+        await retry_transient_telegram(
+            lambda: bot.edit_message_text(
+                inline_message_id=inline_message_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=None,
+            ),
+            "editMessageText(inline)",
         )
     except Exception as e:
         logger.debug("Не удалось отредактировать inline-сообщение: %s", e)
@@ -541,7 +596,14 @@ def _resolve_storage_chat_id() -> Optional[int]:
     return None
 
 
-async def _upload_video_and_get_file_id(bot: Bot, file_path: str) -> Optional[str]:
+async def _upload_video_and_get_file_id(
+    bot: Bot,
+    file_path: str,
+    *,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    duration: Optional[float] = None,
+) -> Optional[str]:
     """
     Заливает видео в storage-чат и возвращает его Telegram file_id.
     Промежуточное сообщение удаляется (best-effort), file_id остаётся валидным.
@@ -552,11 +614,18 @@ async def _upload_video_and_get_file_id(bot: Bot, file_path: str) -> Optional[st
         return None
 
     try:
-        staging = await bot.send_video(
-            chat_id=storage_chat_id,
-            video=FSInputFile(file_path),
-            supports_streaming=True,
-            disable_notification=True,
+        staging = await retry_transient_telegram(
+            lambda: bot.send_video(
+                chat_id=storage_chat_id,
+                video=FSInputFile(file_path),
+                duration=telegram_duration(duration),
+                width=width,
+                height=height,
+                supports_streaming=True,
+                disable_notification=True,
+                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+            ),
+            "sendVideo(storage)",
         )
     except Exception as e:
         logger.error(
@@ -587,10 +656,14 @@ async def _upload_photo_and_get_file_id(bot: Bot, file_path: str) -> Optional[st
         return None
 
     try:
-        staging = await bot.send_photo(
-            chat_id=storage_chat_id,
-            photo=FSInputFile(file_path),
-            disable_notification=True,
+        staging = await retry_transient_telegram(
+            lambda: bot.send_photo(
+                chat_id=storage_chat_id,
+                photo=FSInputFile(file_path),
+                disable_notification=True,
+                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+            ),
+            "sendPhoto(storage)",
         )
     except Exception as e:
         logger.error(
@@ -626,11 +699,15 @@ async def _upload_audio_and_get_file_id(
         return None
 
     try:
-        staging = await bot.send_audio(
-            chat_id=storage_chat_id,
-            audio=FSInputFile(file_path),
-            title=title,
-            disable_notification=True,
+        staging = await retry_transient_telegram(
+            lambda: bot.send_audio(
+                chat_id=storage_chat_id,
+                audio=FSInputFile(file_path),
+                title=title,
+                disable_notification=True,
+                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+            ),
+            "sendAudio(storage)",
         )
     except Exception as e:
         logger.error(

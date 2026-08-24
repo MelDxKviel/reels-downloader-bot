@@ -331,6 +331,64 @@ def test_fetch_instagram_media_info_with_video_marker(tmp_path):
     assert result["has_video"] is True
 
 
+def test_fetch_instagram_media_info_trusts_photo_marker_only_on_target_embed(tmp_path):
+    d = make_d(tmp_path)
+    cover = '<meta property="og:image" content="https://scontent.cdninstagram.com/v/t51/cover.jpg">'
+
+    def fake_get(candidate, **_kwargs):
+        if "/embed" in candidate:
+            return cover
+        if "www.instagram.com" in candidate:
+            return cover + '{"media_type": 1}'
+        return None
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result is not None
+    assert result["media_kind"] == "unknown"
+
+
+def test_fetch_instagram_media_info_confirms_target_embed_photo(tmp_path):
+    d = make_d(tmp_path)
+    html = (
+        '<meta property="og:image" '
+        'content="https://scontent.cdninstagram.com/v/t51/photo.jpg">'
+        '{"media_type": 1}'
+    )
+    with patch.object(d, "_http_get_html", return_value=html):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result is not None
+    assert result["media_kind"] == "photo"
+
+
+def test_fetch_instagram_media_info_ignores_main_page_auxiliary_media(tmp_path):
+    d = make_d(tmp_path)
+    target = "https://scontent.cdninstagram.com/v/t51/target.jpg"
+    auxiliary = "https://scontent.cdninstagram.com/v/t51/recommended.jpg"
+    embed_html = (
+        '{"media_type":1,"image_versions2":{"candidates":['
+        f'{{"url":"{target}","width":1080,"height":1920}}]}}'
+    )
+    main_html = (
+        '{"media_type":2,"video_versions":[{"url":"https://cdn/video.mp4"}],'
+        '"image_versions2":{"candidates":['
+        f'{{"url":"{auxiliary}","width":1080,"height":1080}}]}}'
+    )
+
+    def fake_get(candidate, **_kwargs):
+        return embed_html if "/embed" in candidate else main_html
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result is not None
+    assert result["has_video"] is False
+    assert result["media_kind"] == "photo"
+    assert result["image_urls"] == [target]
+
+
 def test_fetch_instagram_media_info_aggregates_multiple_endpoints(tmp_path):
     d = make_d(tmp_path)
     htmls = [
@@ -626,16 +684,50 @@ def test_try_instagram_photo_groups_variants(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_download_with_instagram_photo_short_circuit(tmp_path):
+async def test_download_does_not_trust_global_instagram_photo_marker(tmp_path):
     d = make_d(tmp_path)
     photo = fake_file(tmp_path, "x.jpg")
+    video = fake_file(tmp_path, "x.mp4")
     photo_result = DownloadResult(
-        success=True, file_path=str(photo), is_photo=True, photo_paths=[str(photo)]
+        success=True,
+        file_path=str(photo),
+        is_photo=True,
+        photo_paths=[str(photo)],
+        media_type_confirmed=False,
     )
-    with patch.object(d, "_try_instagram_photo", return_value=photo_result):
+    video_result = DownloadResult(success=True, file_path=str(video), is_photo=False)
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=photo_result),
+        patch.object(d, "_download_sync", return_value=video_result) as download_sync,
+    ):
         result = await d.download("https://www.instagram.com/p/abc/")
     assert result.success
+    assert result.is_photo is False
+    assert result.file_path == str(video)
+    assert not photo.exists()
+    download_sync.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_download_short_circuits_target_scoped_instagram_photo(tmp_path):
+    d = make_d(tmp_path)
+    photo = fake_file(tmp_path, "confirmed.jpg")
+    photo_result = DownloadResult(
+        success=True,
+        file_path=str(photo),
+        is_photo=True,
+        photo_paths=[str(photo)],
+        media_type_confirmed=True,
+    )
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=photo_result),
+        patch.object(d, "_download_sync") as download_sync,
+    ):
+        result = await d.download("https://www.instagram.com/p/abc/")
+
     assert result.is_photo
+    assert photo.exists()
+    download_sync.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -934,6 +1026,34 @@ async def test_download_kkinstagram_fallback_also_fails(tmp_path):
         with patch.object(d, "_try_instagram_photo", return_value=None):
             result = await d.download(url)
     assert not result.success
+
+
+@pytest.mark.asyncio
+async def test_kkinstagram_photo_uses_explicit_no_video_fallback(tmp_path):
+    from yt_dlp.utils import DownloadError
+
+    d = make_d(tmp_path)
+    photo = fake_file(tmp_path, "photo.jpg")
+    candidate = DownloadResult(
+        success=True,
+        file_path=str(photo),
+        is_photo=True,
+        photo_paths=[str(photo)],
+    )
+    url = "https://kkinstagram.com/p/abc/"
+
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=candidate),
+        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+    ):
+        mock_ydl = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.side_effect = DownloadError("There is no video in this post")
+        result = await d.download(url)
+
+    assert result.success
+    assert result.is_photo
+    assert photo.exists()
 
 
 # ── _find_downloaded_file ────────────────────────────────────────────────────

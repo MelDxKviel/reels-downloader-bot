@@ -107,7 +107,7 @@
   "inline.mp3_description": "Извлечь аудио в формате MP3",
   "inline.mp3_status": "⏳ Извлекаю MP3 с <b>{platform}</b>...",
   "inline.error.generic": "❌ <b>Произошла ошибка</b>\n\nПопробуйте позже.",
-  "inline.error.failed": "❌ <b>Не удалось скачать</b>\n\nПричина: {reason}",
+  "inline.error.failed": "❌ <b>Не удалось загрузить</b>",
   "inline.error.publish_video": "❌ <b>Не удалось опубликовать</b>\n\nInline-storage не настроен или файл не загрузился. Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",
   "inline.error.publish_photo": "❌ <b>Не удалось опубликовать</b>\n\nInline-storage не настроен или файл не загрузился. Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",
   "inline.error.publish_mp3": "❌ <b>Не удалось опубликовать MP3</b>\n\nInline-storage не настроен. Попросите администратора настроить <code>VIDEO_STORAGE_CHAT_ID</code>.",

@@ -15,6 +15,7 @@ _SUPPORTED_HOSTS = frozenset(
         "youtube.com",
         "youtu.be",
         "instagram.com",
+        "kkinstagram.com",
         "tiktok.com",
         "twitter.com",
         "x.com",
@@ -137,7 +138,12 @@ def get_platform_name(url: str) -> str:
         or host.endswith(".youtu.be")
     ):
         return "YouTube"
-    if host == "instagram.com" or host.endswith(".instagram.com"):
+    if (
+        host == "instagram.com"
+        or host.endswith(".instagram.com")
+        or host == "kkinstagram.com"
+        or host.endswith(".kkinstagram.com")
+    ):
         return "Instagram"
     if host == "tiktok.com" or host.endswith(".tiktok.com"):
         return "TikTok"

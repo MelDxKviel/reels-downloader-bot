@@ -15,6 +15,11 @@ from aiogram.types import (
     Message,
 )
 
+from src.bot.telegram_retry import (
+    TELEGRAM_UPLOAD_TIMEOUT,
+    retry_transient_telegram,
+    telegram_duration,
+)
 from src.services.database import DatabaseService
 from src.services.downloader import CarouselSlide, DownloadResult, downloader
 from src.services.i18n import Translator, translate_download_error
@@ -65,9 +70,13 @@ async def _send_rich_carousel(
         return False
     rich_html = _build_slideshow_html(slides, caption)
     try:
-        await message.bot.send_rich_message(
-            chat_id=message.chat.id,
-            rich_message=InputRichMessage(html=rich_html),
+        await retry_transient_telegram(
+            lambda: message.bot.send_rich_message(
+                chat_id=message.chat.id,
+                rich_message=InputRichMessage(html=rich_html),
+                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+            ),
+            "sendRichMessage(user)",
         )
         return True
     except TelegramAPIError as e:
@@ -143,22 +152,54 @@ async def handle_url(message: Message, db: DatabaseService, t: Translator) -> No
                 photo_paths = result.photo_paths or [result.file_path]
                 try:
                     if len(photo_paths) > 1:
-                        media = [InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths]
-                        await message.answer_media_group(media=media)
+                        await retry_transient_telegram(
+                            lambda: message.answer_media_group(
+                                media=[InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths],
+                                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                            ),
+                            "sendMediaGroup(user)",
+                        )
                     else:
-                        await message.answer_photo(photo=FSInputFile(photo_paths[0]))
+                        await retry_transient_telegram(
+                            lambda: message.answer_photo(
+                                photo=FSInputFile(photo_paths[0]),
+                                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                            ),
+                            "sendPhoto(user)",
+                        )
                 except TelegramBadRequest as e:
                     if "IMAGE_PROCESS_FAILED" not in str(e):
                         raise
                     # Unsupported image format (e.g. WebP, HEIC) — send as file
                     if len(photo_paths) > 1:
-                        docs = [InputMediaDocument(media=FSInputFile(p)) for p in photo_paths]
-                        await message.answer_media_group(media=docs)
+                        await retry_transient_telegram(
+                            lambda: message.answer_media_group(
+                                media=[
+                                    InputMediaDocument(media=FSInputFile(p)) for p in photo_paths
+                                ],
+                                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                            ),
+                            "sendMediaGroup(documents)",
+                        )
                     else:
-                        await message.answer_document(document=FSInputFile(photo_paths[0]))
+                        await retry_transient_telegram(
+                            lambda: message.answer_document(
+                                document=FSInputFile(photo_paths[0]),
+                                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                            ),
+                            "sendDocument(user)",
+                        )
             else:
-                sent = await message.answer_video(
-                    video=FSInputFile(result.file_path), supports_streaming=True
+                sent = await retry_transient_telegram(
+                    lambda: message.answer_video(
+                        video=FSInputFile(result.file_path),
+                        duration=telegram_duration(result.duration),
+                        width=result.width,
+                        height=result.height,
+                        supports_streaming=True,
+                        request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                    ),
+                    "sendVideo(user)",
                 )
                 # Сохраняем Telegram file_id, чтобы inline-режим отдавал видео моментально
                 if sent.video and sent.video.file_id:

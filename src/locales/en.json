@@ -107,7 +107,7 @@
   "inline.mp3_description": "Extract audio as MP3",
   "inline.mp3_status": "⏳ Extracting MP3 from <b>{platform}</b>...",
   "inline.error.generic": "❌ <b>An error occurred</b>\n\nTry again later.",
-  "inline.error.failed": "❌ <b>Download failed</b>\n\nReason: {reason}",
+  "inline.error.failed": "❌ <b>Failed to load</b>",
   "inline.error.publish_video": "❌ <b>Failed to publish</b>\n\nInline storage is not configured or the file failed to upload. Ask the admin to configure <code>VIDEO_STORAGE_CHAT_ID</code>.",
   "inline.error.publish_photo": "❌ <b>Failed to publish</b>\n\nInline storage is not configured or the file failed to upload. Ask the admin to configure <code>VIDEO_STORAGE_CHAT_ID</code>.",
   "inline.error.publish_mp3": "❌ <b>Failed to publish MP3</b>\n\nInline storage is not configured. Ask the admin to configure <code>VIDEO_STORAGE_CHAT_ID</code>.",

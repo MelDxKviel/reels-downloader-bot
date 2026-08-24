@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramServerError
 
 from src.bot.handlers import download_cmd as dc
 from src.services.downloader import DownloadResult
@@ -34,11 +35,47 @@ async def test_cmd_download_with_url_starts_download(tmp_path):
     sent.video.file_id = "fid"
     msg.answer_video.return_value = sent
 
-    result = DownloadResult(success=True, file_path=str(video), title="T")
+    result = DownloadResult(
+        success=True,
+        file_path=str(video),
+        title="T",
+        duration=7.0,
+        width=720,
+        height=1280,
+    )
     with patch.object(dc.downloader, "download", AsyncMock(return_value=result)):
         await dc.cmd_download(msg, state, db, Translator("en"))
 
     msg.answer_video.assert_awaited()
+    kwargs = msg.answer_video.await_args.kwargs
+    assert (kwargs["width"], kwargs["height"], kwargs["duration"]) == (720, 1280, 7)
+    assert kwargs["request_timeout"] == 180
+
+
+@pytest.mark.asyncio
+async def test_download_command_retries_transient_telegram_504(tmp_path):
+    msg = make_message()
+    sm = make_status_message()
+    db = make_db()
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    sent = MagicMock()
+    sent.video = MagicMock(file_id="fid")
+    msg.answer_video.side_effect = [
+        TelegramServerError(method=MagicMock(), message="Gateway Timeout (504)"),
+        sent,
+    ]
+    result = DownloadResult(success=True, file_path=str(video), width=720, height=1280)
+
+    with (
+        patch.object(dc.downloader, "download", AsyncMock(return_value=result)),
+        patch("src.bot.telegram_retry.asyncio.sleep", AsyncMock()) as sleep,
+    ):
+        await dc._download_and_send(msg, db, sm, "https://youtube.com/watch?v=a", Translator("en"))
+
+    assert msg.answer_video.await_count == 2
+    sleep.assert_awaited_once_with(1.0)
+    db.record_download.assert_awaited()
 
 
 @pytest.mark.asyncio

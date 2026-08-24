@@ -96,6 +96,82 @@ def test_cache_persists_to_json(tmp_path):
     assert d2.get_from_cache(url) is not None
 
 
+def test_video_dimensions_survive_cache_roundtrip(tmp_path):
+    d = make_downloader(tmp_path)
+    video = fake_video(tmp_path)
+    url = "https://youtube.com/watch?v=portrait"
+    d.add_to_cache(
+        url,
+        DownloadResult(
+            success=True,
+            file_path=str(video),
+            duration=12.5,
+            width=720,
+            height=1280,
+        ),
+    )
+
+    cached = d.get_from_cache(url)
+    assert cached is not None
+    assert (cached.width, cached.height, cached.duration) == (720, 1280, 12.5)
+
+
+def test_legacy_media_cache_is_evicted_but_mp3_file_id_is_preserved(tmp_path):
+    d = make_downloader(tmp_path)
+    photo = fake_video(tmp_path, "wrong-cover.jpg")
+    url = "https://www.instagram.com/p/VIDEO/"
+    url_hash = d._get_url_hash(url)
+    d.cache[url_hash] = {
+        "file_path": str(photo),
+        "is_photo": True,
+        "telegram_photo_file_id": "bad-photo-id",
+        "telegram_mp3_file_id": "good-mp3-id",
+    }
+
+    assert d.get_from_cache(url) is None
+    assert not photo.exists()
+    assert d.get_telegram_photo_file_id(url) is None
+    assert d.get_telegram_mp3_file_id(url) == "good-mp3-id"
+    reloaded = make_downloader(tmp_path)
+    assert reloaded.get_telegram_mp3_file_id(url) == "good-mp3-id"
+
+
+@pytest.mark.parametrize("is_photo", [False, True])
+def test_missing_v2_local_file_preserves_current_telegram_ids_across_restart(tmp_path, is_photo):
+    d = make_downloader(tmp_path)
+    media = fake_video(tmp_path, "media.jpg" if is_photo else "media.mp4")
+    url = "https://www.instagram.com/p/telegram-only/"
+    d.add_to_cache(
+        url,
+        DownloadResult(
+            success=True,
+            file_path=str(media),
+            is_photo=is_photo,
+            photo_paths=[str(media)] if is_photo else None,
+        ),
+    )
+    if is_photo:
+        d.set_telegram_photo_file_id(url, "media-id")
+    else:
+        d.set_telegram_file_id(url, "media-id")
+    d.set_telegram_mp3_file_id(url, "mp3-id")
+    media.unlink()
+
+    assert d.get_from_cache(url) is None
+    getter = d.get_telegram_photo_file_id if is_photo else d.get_telegram_file_id
+    opposite_getter = d.get_telegram_file_id if is_photo else d.get_telegram_photo_file_id
+    assert getter(url) == "media-id"
+    assert opposite_getter(url) is None
+    assert d.get_telegram_mp3_file_id(url) == "mp3-id"
+
+    reloaded = make_downloader(tmp_path)
+    reloaded_getter = (
+        reloaded.get_telegram_photo_file_id if is_photo else reloaded.get_telegram_file_id
+    )
+    assert reloaded_getter(url) == "media-id"
+    assert reloaded.get_telegram_mp3_file_id(url) == "mp3-id"
+
+
 # ── cache: clear ──────────────────────────────────────────────────────────────
 
 
@@ -266,6 +342,52 @@ def test_get_ydl_opts_format_with_ffmpeg(tmp_path):
     opts = d._get_ydl_opts("out.%(ext)s", "https://youtube.com/watch?v=abc")
     assert "bestvideo" in opts["format"]
     assert opts.get("merge_output_format") == "mp4"
+
+
+def test_get_ydl_opts_retries_http_fragments_and_extractor_with_backoff(tmp_path):
+    d = make_downloader(tmp_path)
+    opts = d._get_ydl_opts("out.%(ext)s", "https://youtube.com/watch?v=x")
+    assert opts["retries"] == 3
+    assert opts["fragment_retries"] == 3
+    assert opts["extractor_retries"] == 3
+    assert opts["retry_sleep_functions"]["http"](n=0) == 1
+    assert opts["retry_sleep_functions"]["extractor"](n=3) == 8
+
+
+def test_video_metadata_ffprobe_applies_rotation():
+    probe = MagicMock(
+        returncode=0,
+        stdout=(
+            '{"streams":[{"width":1920,"height":1080,'
+            '"side_data_list":[{"rotation":-90}]}],"format":{"duration":"5.5"}}'
+        ),
+    )
+    with (
+        patch("src.services.downloader.shutil.which", return_value="ffprobe"),
+        patch("src.services.downloader.subprocess.run", return_value=probe),
+    ):
+        width, height, duration = VideoDownloader._video_metadata(
+            {"width": 1920, "height": 1080}, "portrait.mp4"
+        )
+    assert (width, height, duration) == (1080, 1920, 5.5)
+
+
+def test_video_metadata_ffprobe_zero_rotation_overrides_stale_extractor_rotation():
+    probe = MagicMock(
+        returncode=0,
+        stdout=(
+            '{"streams":[{"width":720,"height":1280,'
+            '"side_data_list":[{"rotation":0}]}],"format":{}}'
+        ),
+    )
+    with (
+        patch("src.services.downloader.shutil.which", return_value="ffprobe"),
+        patch("src.services.downloader.subprocess.run", return_value=probe),
+    ):
+        width, height, _duration = VideoDownloader._video_metadata(
+            {"width": 1280, "height": 720, "rotation": 90}, "portrait.mp4"
+        )
+    assert (width, height) == (720, 1280)
 
 
 # ── download: unsupported URL ─────────────────────────────────────────────────
@@ -439,6 +561,22 @@ def test_set_and_get_telegram_photo_file_id(tmp_path):
     assert d.get_telegram_photo_file_id(url) == "photo_file_id_xyz"
 
 
+def test_telegram_media_file_id_setters_replace_the_opposite_type(tmp_path):
+    d = make_downloader(tmp_path)
+    url = "https://www.instagram.com/p/CHANGED/"
+
+    d.set_telegram_file_id(url, "video-id")
+    d.set_telegram_photo_file_id(url, "photo-id")
+    assert d.get_telegram_file_id(url) is None
+    assert d.get_telegram_photo_file_id(url) == "photo-id"
+    assert d.get_cached_media_type(url) == "photo"
+
+    d.set_telegram_file_id(url, "new-video-id")
+    assert d.get_telegram_photo_file_id(url) is None
+    assert d.get_telegram_file_id(url) == "new-video-id"
+    assert d.get_cached_media_type(url) == "video"
+
+
 def test_set_and_get_telegram_mp3_file_id(tmp_path):
     d = make_downloader(tmp_path)
     url = "https://youtube.com/watch?v=abc"
@@ -543,6 +681,45 @@ def test_parse_instagram_html_detects_is_video_marker():
     html = '{"is_video": true}'
     result = VideoDownloader._parse_instagram_html(html)
     assert result["has_video_marker"] is True
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        '"media_type": 2',
+        '"video_versions": [{"url": "https://cdn.example.com/video.mp4"}]',
+        '"video_dash_manifest": "<MPD/>"',
+        '"__typename": "GraphVideo"',
+    ],
+)
+def test_parse_instagram_html_modern_video_markers_override_square_cover(marker):
+    html = (
+        '<meta property="og:image" '
+        'content="https://scontent.cdninstagram.com/v/t51/cover.jpg?stp=s1080x1080">'
+        f"{{{marker}}}"
+    )
+    result = VideoDownloader._parse_instagram_html(html)
+    assert result["media_kind"] == "video"
+    assert result["has_video_marker"] is True
+
+
+def test_parse_instagram_html_bare_og_image_is_unknown_not_photo():
+    html = '<meta property="og:image" content="https://cdn.example.com/cover.jpg">'
+    result = VideoDownloader._parse_instagram_html(html)
+    assert result["media_kind"] == "unknown"
+
+
+def test_parse_instagram_html_prefers_largest_image_versions2_candidate():
+    large = "https://scontent.cdninstagram.com/v/t51/portrait-large.jpg"
+    small = "https://scontent.cdninstagram.com/v/t51/portrait-small.jpg"
+    html = (
+        '{"media_type":1,"image_versions2":{"candidates":['
+        f'{{"width":320,"height":568,"url":"{small}"}},'
+        f'{{"url":"{large}","height":1920,"width":1080}}]}}'
+    )
+    result = VideoDownloader._parse_instagram_html(html)
+    assert result["media_kind"] == "photo"
+    assert result["image_urls"] == [large]
 
 
 def test_parse_instagram_html_extracts_title():
@@ -689,34 +866,29 @@ async def test_download_retries_without_cookies_on_invalid_cookiefile(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_download_extracts_photo_frame_for_short_instagram_post(tmp_path):
-    """Instagram /p/ posts with duration<=1 should be returned as photos."""
+@pytest.mark.parametrize("duration", [None, 0.0, 0.5])
+async def test_download_keeps_instagram_video_when_duration_missing_or_short(tmp_path, duration):
+    """A real /p/*.mp4 stays video even when Instagram omits or rounds duration."""
     d = make_downloader(tmp_path)
     video = fake_video(tmp_path, "downloaded.mp4")
-    photo = fake_video(tmp_path, "downloaded_photo.jpg")
     url = "https://www.instagram.com/p/ABC123/"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+    ):
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
-        mock_ydl.extract_info.return_value = {"title": "Photo Post", "duration": 0.0}
+        mock_ydl.extract_info.return_value = {"title": "Video Post", "duration": duration}
         mock_ydl.prepare_filename.return_value = str(video)
 
-        with patch.object(
-            d,
-            "_extract_photo_frame",
-            return_value=DownloadResult(
-                success=True,
-                file_path=str(photo),
-                title="Photo Post",
-                is_photo=True,
-                photo_paths=[str(photo)],
-            ),
-        ):
+        with patch.object(d, "_extract_photo_frame") as mock_extract:
             result = await d.download(url)
 
     assert result.success
-    assert result.is_photo is True
+    assert result.is_photo is False
+    assert result.file_path == str(video)
+    mock_extract.assert_not_called()
 
 
 @pytest.mark.asyncio

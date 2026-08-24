@@ -45,6 +45,21 @@ TELEGRAM_BOT_USER_AGENT = "TelegramBot (like TwitterBot)"
 _IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".mkv", ".m4v"})
 
+# v1 cache entries could contain an Instagram video thumbnail marked as a photo
+# (and a Telegram file_id created with the wrong preview geometry).  Media cache
+# entries are disposable, so old photo/video fields are lazily discarded while
+# unrelated cached MP3 file_ids are preserved.
+_MEDIA_CACHE_VERSION = 2
+
+
+def _download_retry_delay(n: int) -> float:
+    """Deterministic exponential backoff used by yt-dlp HTTP/extractor retries."""
+
+    # yt-dlp calls retry callbacks as ``sleep_func(n=retry_index)`` with a
+    # zero-based index, so the parameter name is part of the callback API.
+    return min(2 ** max(n, 0), 8)
+
+
 # Для HTML-запросов используем десктопный браузерный UA: Instagram на UA
 # вида TelegramBot/WhatsApp отдаёт упрощённый link-preview без inline JSON,
 # а именно из JSON берётся полноразмерный display_url каждого слайда.
@@ -106,6 +121,12 @@ class DownloadResult:
     from_cache: bool = False
     is_photo: bool = False
     photo_paths: Optional[list] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    # True only when target-scoped Instagram embed metadata or yt-dlp positively
+    # identified a photo. Main-page markers are not trusted because they can
+    # belong to unrelated/recommended posts.
+    media_type_confirmed: bool = False
     # Упорядоченные слайды карусели Instagram как публичные URL — для отправки
     # нативной rich-карусели (<tg-slideshow>). photo_paths при этом остаётся
     # локальным фолбэком (альбом), если rich-сообщение отправить не удалось.
@@ -130,8 +151,21 @@ class VideoDownloader:
                     cache = json.load(f)
                 valid_cache = {}
                 for url_hash, data in cache.items():
+                    if not isinstance(data, dict):
+                        continue
                     file_path = data.get("file_path")
-                    if file_path and isinstance(file_path, str) and os.path.exists(file_path):
+                    has_local_file = (
+                        isinstance(file_path, str) and bool(file_path) and os.path.exists(file_path)
+                    )
+                    has_telegram_id = any(
+                        isinstance(data.get(key), str) and bool(data.get(key))
+                        for key in (
+                            "telegram_file_id",
+                            "telegram_photo_file_id",
+                            "telegram_mp3_file_id",
+                        )
+                    )
+                    if has_local_file or has_telegram_id:
                         valid_cache[url_hash] = data
                 return valid_cache
             except Exception:
@@ -146,6 +180,79 @@ class VideoDownloader:
         except Exception:
             pass
 
+    @staticmethod
+    def _has_cached_media(entry: dict) -> bool:
+        return any(
+            entry.get(key)
+            for key in (
+                "file_path",
+                "photo_paths",
+                "telegram_file_id",
+                "telegram_photo_file_id",
+                "is_photo",
+                "carousel_slides",
+            )
+        )
+
+    def _invalidate_legacy_media(self, url_hash: str, entry: dict) -> dict:
+        """Drop stale v1 photo/video data but retain an independent MP3 file_id."""
+
+        if entry.get("media_cache_version") == _MEDIA_CACHE_VERSION:
+            return entry
+        if not self._has_cached_media(entry):
+            return entry
+
+        self._delete_entry_files(entry)
+        migrated = {"cached_at": time.time()}
+        mp3_file_id = entry.get("telegram_mp3_file_id")
+        if isinstance(mp3_file_id, str) and mp3_file_id:
+            migrated["telegram_mp3_file_id"] = mp3_file_id
+        self.cache[url_hash] = migrated
+        self._save_cache()
+        return migrated
+
+    def _current_media_entry(self, url: str) -> Optional[dict]:
+        url_hash = get_url_hash(url)
+        entry = self.cache.get(url_hash)
+        if not entry:
+            return None
+        entry = self._invalidate_legacy_media(url_hash, entry)
+        return entry if self._has_cached_media(entry) else None
+
+    def _clear_local_media_fields(self, entry: dict, *, delete_files: bool = False) -> None:
+        if delete_files:
+            self._delete_entry_files(entry)
+        for key in (
+            "file_path",
+            "photo_paths",
+            "title",
+            "duration",
+            "width",
+            "height",
+            "is_photo",
+            "media_type_confirmed",
+            "carousel_slides",
+        ):
+            entry.pop(key, None)
+
+    def _prune_missing_local_media(self, url_hash: str, entry: dict) -> None:
+        """Drop stale local fields without losing still-valid Telegram IDs."""
+
+        self._clear_local_media_fields(entry)
+        has_telegram_id = any(
+            isinstance(entry.get(key), str) and bool(entry.get(key))
+            for key in (
+                "telegram_file_id",
+                "telegram_photo_file_id",
+                "telegram_mp3_file_id",
+            )
+        )
+        if has_telegram_id:
+            self.cache[url_hash] = entry
+        else:
+            self.cache.pop(url_hash, None)
+        self._save_cache()
+
     def _get_url_hash(self, url: str) -> str:
         return get_url_hash(url)
 
@@ -153,7 +260,12 @@ class VideoDownloader:
         """Проверяет наличие видео/фото в кэше."""
         url_hash = get_url_hash(url)
         if url_hash in self.cache:
-            cached = self.cache[url_hash]
+            cached = self._invalidate_legacy_media(url_hash, self.cache[url_hash])
+            if not self._has_cached_media(cached):
+                if not cached.get("telegram_mp3_file_id"):
+                    self.cache.pop(url_hash, None)
+                    self._save_cache()
+                return None
             file_path = cached.get("file_path")
             photo_paths_raw = cached.get("photo_paths")
             is_photo = bool(cached.get("is_photo", False))
@@ -168,13 +280,15 @@ class VideoDownloader:
                         duration=cached.get("duration"),
                         is_photo=True,
                         photo_paths=existing,
+                        width=cached.get("width"),
+                        height=cached.get("height"),
+                        media_type_confirmed=bool(cached.get("media_type_confirmed", False)),
                         carousel_slides=self._deserialize_carousel_slides(
                             cached.get("carousel_slides")
                         ),
                         from_cache=True,
                     )
-                del self.cache[url_hash]
-                self._save_cache()
+                self._prune_missing_local_media(url_hash, cached)
                 return None
 
             if file_path and isinstance(file_path, str) and os.path.exists(file_path):
@@ -185,14 +299,16 @@ class VideoDownloader:
                     duration=cached.get("duration"),
                     is_photo=is_photo,
                     photo_paths=[file_path] if is_photo else None,
+                    width=cached.get("width"),
+                    height=cached.get("height"),
+                    media_type_confirmed=bool(cached.get("media_type_confirmed", False)),
                     carousel_slides=self._deserialize_carousel_slides(
                         cached.get("carousel_slides")
                     ),
                     from_cache=True,
                 )
             else:
-                del self.cache[url_hash]
-                self._save_cache()
+                self._prune_missing_local_media(url_hash, cached)
         return None
 
     @staticmethod
@@ -217,25 +333,42 @@ class VideoDownloader:
         if result.success and result.file_path:
             url_hash = get_url_hash(url)
             entry = self.cache.get(url_hash, {})
-            telegram_file_id = entry.get("telegram_file_id")
+            if entry:
+                entry = self._invalidate_legacy_media(url_hash, entry)
             new_entry: Dict[str, Any] = {
                 "file_path": result.file_path,
                 "title": result.title,
                 "duration": result.duration,
+                "width": result.width,
+                "height": result.height,
+                "media_cache_version": _MEDIA_CACHE_VERSION,
                 "cached_at": time.time(),
             }
             if result.is_photo:
                 new_entry["is_photo"] = True
+                new_entry["media_type_confirmed"] = bool(result.media_type_confirmed)
                 paths = result.photo_paths or [result.file_path]
                 new_entry["photo_paths"] = list(paths)
             if result.carousel_slides:
                 new_entry["carousel_slides"] = [
                     {"url": s.url, "is_video": bool(s.is_video)} for s in result.carousel_slides
                 ]
-            if telegram_file_id:
-                new_entry["telegram_file_id"] = telegram_file_id
+            telegram_media_key = "telegram_photo_file_id" if result.is_photo else "telegram_file_id"
+            telegram_media_id = entry.get(telegram_media_key)
+            if telegram_media_id:
+                new_entry[telegram_media_key] = telegram_media_id
+            telegram_mp3_file_id = entry.get("telegram_mp3_file_id")
+            if telegram_mp3_file_id:
+                new_entry["telegram_mp3_file_id"] = telegram_mp3_file_id
             self.cache[url_hash] = new_entry
             self._save_cache()
+
+    def discard_result_files(self, result: DownloadResult) -> int:
+        """Delete uncached local files belonging to a completed result."""
+
+        return self._delete_entry_files(
+            {"file_path": result.file_path, "photo_paths": result.photo_paths}
+        )
 
     def _get_or_create_entry(self, url_hash: str) -> dict:
         """Возвращает запись кэша по хэшу, создавая пустую с меткой времени.
@@ -251,8 +384,7 @@ class VideoDownloader:
 
     def get_telegram_file_id(self, url: str) -> Optional[str]:
         """Возвращает сохранённый Telegram file_id для URL, если есть."""
-        url_hash = get_url_hash(url)
-        entry = self.cache.get(url_hash)
+        entry = self._current_media_entry(url)
         if not entry:
             return None
         file_id = entry.get("telegram_file_id")
@@ -263,10 +395,19 @@ class VideoDownloader:
         if not file_id:
             return
         url_hash = get_url_hash(url)
-        entry = self._get_or_create_entry(url_hash)
-        if entry.get("telegram_file_id") == file_id:
+        entry = self._invalidate_legacy_media(url_hash, self._get_or_create_entry(url_hash))
+        if (
+            entry.get("telegram_file_id") == file_id
+            and not entry.get("telegram_photo_file_id")
+            and not entry.get("is_photo")
+        ):
             return
+        if entry.get("is_photo") or entry.get("telegram_photo_file_id"):
+            self._clear_local_media_fields(entry, delete_files=True)
+        entry.pop("telegram_photo_file_id", None)
+        entry.pop("is_photo", None)
         entry["telegram_file_id"] = file_id
+        entry["media_cache_version"] = _MEDIA_CACHE_VERSION
         self._save_cache()
 
     def get_cached_media_type(self, url: str) -> Optional[str]:
@@ -276,8 +417,7 @@ class VideoDownloader:
         определён. Используется inline-хендлером, чтобы не спутать свежие
         file_id с залежавшимися от предыдущего скачивания другого типа.
         """
-        url_hash = get_url_hash(url)
-        entry = self.cache.get(url_hash)
+        entry = self._current_media_entry(url)
         if not entry:
             return None
         if entry.get("is_photo"):
@@ -291,8 +431,7 @@ class VideoDownloader:
 
     def get_telegram_photo_file_id(self, url: str) -> Optional[str]:
         """Возвращает сохранённый Telegram photo file_id для URL, если есть."""
-        url_hash = get_url_hash(url)
-        entry = self.cache.get(url_hash)
+        entry = self._current_media_entry(url)
         if not entry:
             return None
         file_id = entry.get("telegram_photo_file_id")
@@ -303,10 +442,20 @@ class VideoDownloader:
         if not file_id:
             return
         url_hash = get_url_hash(url)
-        entry = self._get_or_create_entry(url_hash)
-        if entry.get("telegram_photo_file_id") == file_id:
+        entry = self._invalidate_legacy_media(url_hash, self._get_or_create_entry(url_hash))
+        if (
+            entry.get("telegram_photo_file_id") == file_id
+            and not entry.get("telegram_file_id")
+            and entry.get("is_photo")
+        ):
             return
+        has_video_local = bool(entry.get("file_path")) and not entry.get("is_photo")
+        if has_video_local or entry.get("telegram_file_id"):
+            self._clear_local_media_fields(entry, delete_files=True)
+        entry.pop("telegram_file_id", None)
+        entry["is_photo"] = True
         entry["telegram_photo_file_id"] = file_id
+        entry["media_cache_version"] = _MEDIA_CACHE_VERSION
         self._save_cache()
 
     def get_telegram_mp3_file_id(self, url: str) -> Optional[str]:
@@ -421,9 +570,11 @@ class VideoDownloader:
         if kk and kk not in candidates:
             candidates.append(kk)
 
-        image_urls: list[str] = []
+        trusted_image_urls: list[str] = []
+        fallback_image_urls: list[str] = []
         video_url: Optional[str] = None
         has_video_marker = False
+        has_photo_marker = False
         title: Optional[str] = None
 
         for candidate in candidates:
@@ -432,13 +583,18 @@ class VideoDownloader:
                 continue
 
             parsed = self._parse_instagram_html(html)
+            candidate_path = (urlparse(candidate).path or "").lower()
+            is_target_embed = is_instagram_url(candidate) and "/embed" in candidate_path
+            image_urls = trusted_image_urls if is_target_embed else fallback_image_urls
             for img in parsed["image_urls"]:
                 if img not in image_urls:
                     image_urls.append(img)
             if parsed["video_url"] and not video_url:
                 video_url = parsed["video_url"]
-            if parsed.get("has_video_marker"):
+            if parsed.get("has_video_marker") and is_target_embed:
                 has_video_marker = True
+            if parsed.get("media_kind") == "photo" and is_target_embed:
+                has_photo_marker = True
             if parsed["title"] and not title:
                 title = parsed["title"]
 
@@ -448,9 +604,11 @@ class VideoDownloader:
             # только первый слайд, другой — полную карусель.
             if has_video_marker:
                 break
-            if len(image_urls) >= MAX_CAROUSEL_ITEMS:
+            active_images = trusted_image_urls or fallback_image_urls
+            if has_photo_marker and len(active_images) >= MAX_CAROUSEL_ITEMS:
                 break
 
+        image_urls = trusted_image_urls or fallback_image_urls
         if not image_urls and not video_url:
             return None
 
@@ -458,6 +616,9 @@ class VideoDownloader:
             "image_urls": image_urls[:MAX_CAROUSEL_ITEMS],
             "video_url": video_url,
             "has_video": has_video_marker,
+            "media_kind": (
+                "video" if has_video_marker else "photo" if has_photo_marker else "unknown"
+            ),
             "title": title,
         }
 
@@ -506,35 +667,68 @@ class VideoDownloader:
         """
         image_urls: list[str] = []
 
-        # 1) display_url из встроенного JSON. Это всегда оригинал без кропа и
-        # в правильном порядке слайдов карусели; все остальные источники ниже —
-        # фолбэки, и часто отдают квадратно обрезанный превью.
-        for m in re.finditer(r'"display_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html):
-            cls._append_unique(image_urls, cls._decode_json_str(m.group(1)))
-
-        # 2) og:image. На основной странице поста = display_url, но на
-        # /embed/ endpoint'ах Instagram подменяет на кроп 1080x1080
-        # (параметр stp=dst-jpg_e35_sNxN), поэтому ставим после display_url.
-        for raw in cls._find_meta_contents(html, "og:image"):
-            cls._append_unique(image_urls, raw)
-        for raw in cls._find_meta_contents(html, "og:image:url"):
-            cls._append_unique(image_urls, raw)
-        for raw in cls._find_meta_contents(html, "og:image:secure_url"):
-            cls._append_unique(image_urls, raw)
-
-        # 3) <img class="EmbeddedMediaImage" src="..."> на embed-странице.
-        for m in re.finditer(
-            r'<img[^>]+class=["\'][^"\']*EmbeddedMediaImage[^"\']*["\'][^>]+src=["\']([^"\']+)["\']',
-            html,
-            re.IGNORECASE,
+        # Instagram's current product payload stores full-size covers/photos in
+        # image_versions2.candidates. Keep the largest candidate first; unlike
+        # og:image these retain the original portrait aspect ratio. A cover is
+        # not proof that the post itself is a photo.
+        json_probe = html_lib.unescape(html).replace(r"\"", '"')
+        for block_match in re.finditer(
+            r'"image_versions2"\s*:\s*\{.*?"candidates"\s*:\s*\[(.*?)\]',
+            json_probe,
+            re.DOTALL,
         ):
-            cls._append_unique(image_urls, html_lib.unescape(m.group(1)))
-        for m in re.finditer(
-            r'<img[^>]+src=["\']([^"\']+)["\'][^>]+class=["\'][^"\']*EmbeddedMediaImage[^"\']*["\']',
-            html,
-            re.IGNORECASE,
-        ):
-            cls._append_unique(image_urls, html_lib.unescape(m.group(1)))
+            block = block_match.group(1)
+            candidates: list[tuple[int, str]] = []
+            for object_match in re.finditer(r"\{([^{}]*)\}", block, re.DOTALL):
+                item = object_match.group(1)
+                url_match = re.search(r'"url"\s*:\s*"((?:[^"\\]|\\.)*)"', item)
+                if not url_match:
+                    continue
+                image_url = cls._decode_json_str(url_match.group(1))
+                if os.path.splitext(urlparse(image_url).path)[1].lower() not in _IMAGE_EXTENSIONS:
+                    continue
+                width_match = re.search(r'"width"\s*:\s*(\d+)', item)
+                height_match = re.search(r'"height"\s*:\s*(\d+)', item)
+                width = int(width_match.group(1)) if width_match else 0
+                height = int(height_match.group(1)) if height_match else 0
+                candidates.append((width * height, image_url))
+            if candidates:
+                _area, image_url = max(candidates, key=lambda item: item[0])
+                cls._append_unique(image_urls, image_url)
+
+        # Older payloads have no image_versions2. Only then fall back to the
+        # legacy sources below; mixing them into a modern result can append the
+        # square og:image cover as an extra carousel slide.
+        if not image_urls:
+            # 1) Legacy display_url из встроенного JSON. Это оригинал без кропа и
+            # в правильном порядке слайдов карусели; все остальные источники ниже —
+            # фолбэки, и часто отдают квадратно обрезанный превью.
+            for m in re.finditer(r'"display_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html):
+                cls._append_unique(image_urls, cls._decode_json_str(m.group(1)))
+
+            # 2) og:image. На основной странице поста = display_url, но на
+            # /embed/ endpoint'ах Instagram подменяет на кроп 1080x1080
+            # (параметр stp=dst-jpg_e35_sNxN), поэтому ставим после display_url.
+            for raw in cls._find_meta_contents(html, "og:image"):
+                cls._append_unique(image_urls, raw)
+            for raw in cls._find_meta_contents(html, "og:image:url"):
+                cls._append_unique(image_urls, raw)
+            for raw in cls._find_meta_contents(html, "og:image:secure_url"):
+                cls._append_unique(image_urls, raw)
+
+            # 3) <img class="EmbeddedMediaImage" src="..."> на embed-странице.
+            for m in re.finditer(
+                r'<img[^>]+class=["\'][^"\']*EmbeddedMediaImage[^"\']*["\'][^>]+src=["\']([^"\']+)["\']',
+                html,
+                re.IGNORECASE,
+            ):
+                cls._append_unique(image_urls, html_lib.unescape(m.group(1)))
+            for m in re.finditer(
+                r'<img[^>]+src=["\']([^"\']+)["\'][^>]+class=["\'][^"\']*EmbeddedMediaImage[^"\']*["\']',
+                html,
+                re.IGNORECASE,
+            ):
+                cls._append_unique(image_urls, html_lib.unescape(m.group(1)))
 
         video_contents = (
             list(cls._find_meta_contents(html, "og:video"))
@@ -543,14 +737,37 @@ class VideoDownloader:
         )
         video_url = video_contents[0] if video_contents else None
 
-        # Реелс/видеопост на embed-странице часто не отдаёт og:video, но в
-        # inline JSON присутствуют `"video_url":"..."` и/или `"is_video":true`.
-        # Поэтому этих маркеров хватает, чтобы не принять видео за фото.
+        # Reels/video posts often have no legacy og:video. Current Instagram
+        # product JSON uses media_type=2, video_versions/video_dash_manifest;
+        # older payloads use GraphVideo/video_url/is_video=true.
         if not video_url:
-            video_match = re.search(r'"video_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+            video_match = re.search(r'"video_url"\s*:\s*"((?:[^"\\]|\\.)*)"', json_probe)
             if video_match:
                 video_url = cls._decode_json_str(video_match.group(1))
-        has_video_marker = bool(video_url) or bool(re.search(r'"is_video"\s*:\s*true', html))
+        video_patterns = (
+            r'"is_video"\s*:\s*true\b',
+            r'"__typename"\s*:\s*"GraphVideo"',
+            r'"media_type"\s*:\s*2\b',
+            r'"video_versions"\s*:\s*\[\s*\{',
+            r'"video_dash_manifest"\s*:\s*"(?!")',
+        )
+        og_types = list(cls._find_meta_contents(html, "og:type"))
+        has_video_marker = bool(video_url) or any(
+            re.search(pattern, json_probe, re.IGNORECASE) for pattern in video_patterns
+        )
+        has_video_marker = has_video_marker or any(
+            value.lower().startswith("video") for value in og_types
+        )
+
+        photo_patterns = (
+            r'"is_video"\s*:\s*false\b',
+            r'"__typename"\s*:\s*"GraphImage"',
+            r'"media_type"\s*:\s*1\b',
+        )
+        has_photo_marker = any(
+            re.search(pattern, json_probe, re.IGNORECASE) for pattern in photo_patterns
+        )
+        media_kind = "video" if has_video_marker else "photo" if has_photo_marker else "unknown"
 
         title_contents = list(cls._find_meta_contents(html, "og:title"))
         title = title_contents[0] if title_contents else None
@@ -559,6 +776,7 @@ class VideoDownloader:
             "image_urls": image_urls,
             "video_url": video_url,
             "has_video_marker": has_video_marker,
+            "media_kind": media_kind,
             "title": title,
         }
 
@@ -763,6 +981,100 @@ class VideoDownloader:
             logger.warning("Не удалось скачать фото %s: %s", image_url, e)
             return None
 
+    @staticmethod
+    def _video_metadata(
+        info: object, file_path: str
+    ) -> tuple[Optional[int], Optional[int], Optional[float]]:
+        """Return display width, height and duration for Telegram's video fields.
+
+        yt-dlp normally copies the selected video format's dimensions to the
+        top-level info dict. ffprobe is a fallback for extractors that omit them;
+        rotation metadata is applied so portrait videos stay portrait in the
+        Telegram preview.
+        """
+
+        def positive_int(value: object) -> Optional[int]:
+            try:
+                number = int(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return number if number > 0 else None
+
+        def optional_float(value: object) -> Optional[float]:
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return number if number >= 0 else None
+
+        def signed_float(value: object) -> Optional[float]:
+            try:
+                return float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+        info_dict = info if isinstance(info, dict) else {}
+        width = positive_int(info_dict.get("width"))
+        height = positive_int(info_dict.get("height"))
+        duration = optional_float(info_dict.get("duration"))
+        rotation = signed_float(info_dict.get("rotation")) or 0.0
+
+        # Probe every video when possible. yt-dlp may provide the encoded
+        # landscape dimensions while rotation exists only in container side
+        # data; relying on the top-level width/height would then give Telegram
+        # the wrong portrait geometry.
+        if shutil.which("ffprobe"):
+            try:
+                proc = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-select_streams",
+                        "v:0",
+                        "-show_entries",
+                        (
+                            "stream=width,height:stream_tags=rotate:"
+                            "stream_side_data=rotation:format=duration"
+                        ),
+                        "-of",
+                        "json",
+                        file_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if proc.returncode == 0:
+                    probe = json.loads(proc.stdout or "{}")
+                    streams = probe.get("streams") if isinstance(probe, dict) else None
+                    stream = streams[0] if isinstance(streams, list) and streams else {}
+                    if isinstance(stream, dict):
+                        width = positive_int(stream.get("width")) or width
+                        height = positive_int(stream.get("height")) or height
+                        tags = stream.get("tags")
+                        if isinstance(tags, dict):
+                            parsed_rotation = signed_float(tags.get("rotate"))
+                            if parsed_rotation is not None:
+                                rotation = parsed_rotation
+                        side_data = stream.get("side_data_list")
+                        if isinstance(side_data, list):
+                            for item in side_data:
+                                if isinstance(item, dict) and item.get("rotation") is not None:
+                                    parsed_rotation = signed_float(item.get("rotation"))
+                                    if parsed_rotation is not None:
+                                        rotation = parsed_rotation
+                                    break
+                    format_info = probe.get("format") if isinstance(probe, dict) else None
+                    if duration is None and isinstance(format_info, dict):
+                        duration = optional_float(format_info.get("duration"))
+            except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired) as e:
+                logger.debug("ffprobe metadata failed for %s: %s", file_path, e)
+
+        if width is not None and height is not None and round(abs(rotation)) % 180 == 90:
+            width, height = height, width
+        return width, height, duration
+
     def _get_ydl_opts(self, output_path: str, url: str) -> dict:
         """Возвращает опции для yt-dlp."""
         if self.has_ffmpeg:
@@ -795,6 +1107,12 @@ class VideoDownloader:
             "socket_timeout": 30,
             "retries": 3,
             "fragment_retries": 3,
+            "extractor_retries": 3,
+            "retry_sleep_functions": {
+                "http": _download_retry_delay,
+                "fragment": _download_retry_delay,
+                "extractor": _download_retry_delay,
+            },
         }
 
         if is_youtube_url(url):
@@ -839,6 +1157,7 @@ class VideoDownloader:
                 duration=result.duration,
                 is_photo=True,
                 photo_paths=[output_path],
+                media_type_confirmed=True,
                 # Сохраняем слайды карусели: rich-карусель ещё будет отправлена, а
                 # локальный фолбэк теперь валидное фото, а не 0-секундное видео.
                 carousel_slides=result.carousel_slides,
@@ -850,12 +1169,12 @@ class VideoDownloader:
     async def download(self, url: str, allow_carousel: bool = True) -> DownloadResult:
         """Скачивает видео по URL.
 
-        ``allow_carousel`` — собирать ли «фото-карусельные» результаты
-        (Instagram-скрейп, fxtwitter). Хендлеры конвертации (/mp3, /gif,
-        /voice, /round) и inline это отключают: им нужен реальный видеофайл в
-        ``file_path`` для FFmpeg/выгрузки, а не фото-слайды. В этом режиме кэш
-        также не читаем и не пишем, чтобы карусельный и одиночный результаты
-        для одного URL не перетирали друг друга.
+        ``allow_carousel`` — собирать ли rich-карусели и использовать общий
+        media-кэш. Хендлеры конвертации и inline отключают это, чтобы не
+        перетирать полный результат поста вариантом только с первым слайдом.
+        Тип Instagram-медиа определяется независимо: подтверждённый фото-пост
+        всё равно возвращается как фото, а неоднозначная обложка проверяется
+        через yt-dlp прежде, чем может стать фото-фолбэком.
         """
         if not is_supported_url(url):
             return DownloadResult(
@@ -871,23 +1190,21 @@ class VideoDownloader:
 
         loop = asyncio.get_event_loop()
 
-        single_photo_fallback: Optional[DownloadResult] = None
-        if allow_carousel and is_instagram_photo_candidate_url(url):
+        photo_fallback: Optional[DownloadResult] = None
+        if is_instagram_photo_candidate_url(url):
             photo_result = await loop.run_in_executor(None, lambda: self._try_instagram_photo(url))
             if photo_result is not None:
-                # Скрейп уже собрал полную карусель (>=2 слайдов) — отдаём как есть.
-                if photo_result.carousel_slides:
-                    self.add_to_cache(url, photo_result)
+                # image_versions2/display_url/og:image are also present on video
+                # posts as covers, and surrounding HTML can contain photo markers
+                # from recommended posts. Keep every HTML image as an untrusted
+                # fallback until yt-dlp explicitly reports that there is no video.
+                # A marker from a target-specific embed is safe to return now;
+                # this preserves photo carousels that yt-dlp intentionally omits.
+                if photo_result.media_type_confirmed:
+                    if allow_carousel:
+                        self.add_to_cache(url, photo_result)
                     return photo_result
-                # Найдено только одно фото. Это может быть и одиночный пост, и
-                # карусель, слайды которой Instagram прячет от публичного скрейпа.
-                # Если заданы IG-cookies, проваливаемся в yt-dlp — он с куками
-                # перечислит все слайды карусели. Без кук yt-dlp всё равно отдаст
-                # 403, поэтому оставляем одиночное фото и не тратим время.
-                if self._get_instagram_cookiefile() is None:
-                    self.add_to_cache(url, photo_result)
-                    return photo_result
-                single_photo_fallback = photo_result
+                photo_fallback = photo_result
 
         # X/Twitter: если в твите есть фото, собираем полную карусель через
         # fxtwitter (yt-dlp теряет фото из Twitter-плейлиста). Видео-онли и
@@ -906,36 +1223,30 @@ class VideoDownloader:
 
         try:
             result = await loop.run_in_executor(None, lambda: self._download_sync(url, ydl_opts))
-            if result.success and is_instagram_photo_candidate_url(url) and result.file_path:
-                # Extract frame for photo posts (yt-dlp downloads them as 0-second videos).
-                # Also attempt for None duration — missing metadata on a /p/ post likely means photo.
-                # Для карусели кадр тоже извлекаем (фолбэк-фото должно быть валидным);
-                # carousel_slides переносится в результат, так что rich-карусель отправится.
-                if result.duration is None or result.duration <= 1.0:
-                    frame_result = await loop.run_in_executor(
-                        None, lambda: self._extract_photo_frame(result)
-                    )
-                    if frame_result is not None:
-                        result = frame_result
-            # Принимаем результат yt-dlp, только если он реально добавил ценность:
-            # собрал карусель или вернул фото. Иначе (одиночный пост, который
-            # yt-dlp отдал 0-секундным видео, а FFmpeg не сконвертировал) лучше
-            # отдать уже скачанное скрейпом фото, а не битое 0-секундное видео.
-            if result.success and (
-                result.carousel_slides or result.is_photo or single_photo_fallback is None
-            ):
+            # A successful local video always wins over an unverified HTML image.
+            # Instagram currently omits duration for many real videos, so duration
+            # must never be used as a media-type detector.
+            if result.success:
                 if allow_carousel:
                     self.add_to_cache(url, result)
                 return result
-            # Фолбэк НЕ кэшируем: транзиентный 403/таймаут yt-dlp не должен
-            # навсегда запинить URL на одно фото — следующий запрос повторит
-            # извлечение и сможет восстановить полную карусель.
-            if single_photo_fallback is not None:
-                return single_photo_fallback
+
+            # Only yt-dlp's explicit "there is no video in this post" result
+            # confirms that an otherwise ambiguous HTML image is the real media.
+            # A 403/timeout/504 remains a failure instead of leaking a square
+            # video thumbnail into the chat and cache.
+            if (
+                photo_fallback is not None
+                and result.error_code == "downloader.error.instagram_photo_no_media"
+            ):
+                confirmed_photo = photo_fallback
+                photo_fallback = None
+                confirmed_photo.media_type_confirmed = True
+                if allow_carousel:
+                    self.add_to_cache(url, confirmed_photo)
+                return confirmed_photo
             return result
         except Exception as e:
-            if single_photo_fallback is not None:
-                return single_photo_fallback
             msg = str(e)
             return DownloadResult(
                 success=False,
@@ -943,6 +1254,17 @@ class VideoDownloader:
                 error_code="downloader.error.download_exception",
                 error_args={"message": msg},
             )
+        finally:
+            # An HTML image is downloaded before yt-dlp so it can serve as a
+            # confirmed photo fallback. If yt-dlp returns a video or any other
+            # error, discard that temporary cover instead of leaking an orphan.
+            if photo_fallback is not None:
+                self._delete_entry_files(
+                    {
+                        "file_path": photo_fallback.file_path,
+                        "photo_paths": photo_fallback.photo_paths,
+                    }
+                )
 
     def _try_instagram_photo(self, url: str) -> Optional[DownloadResult]:
         """
@@ -1022,6 +1344,7 @@ class VideoDownloader:
             title=title,
             is_photo=True,
             photo_paths=downloaded,
+            media_type_confirmed=meta.get("media_kind") == "photo",
             carousel_slides=carousel_slides,
         )
 
@@ -1248,6 +1571,14 @@ class VideoDownloader:
                         )
                     file_ext = os.path.splitext(downloaded_file_path)[1].lower()
                     is_photo = file_ext in _IMAGE_EXTENSIONS
+                    width: Optional[int] = None
+                    height: Optional[int] = None
+                    if not is_photo:
+                        width, height, probed_duration = self._video_metadata(
+                            info, downloaded_file_path
+                        )
+                        if probed_duration is not None:
+                            duration = probed_duration
                     return DownloadResult(
                         success=True,
                         file_path=downloaded_file_path,
@@ -1255,6 +1586,8 @@ class VideoDownloader:
                         duration=duration,
                         is_photo=is_photo,
                         photo_paths=[downloaded_file_path] if is_photo else None,
+                        width=width,
+                        height=height,
                         carousel_slides=carousel_slides,
                     )
                 else:
@@ -1270,6 +1603,12 @@ class VideoDownloader:
                     if found_file:
                         file_ext = os.path.splitext(found_file)[1].lower()
                         is_photo = file_ext in _IMAGE_EXTENSIONS
+                        width = None
+                        height = None
+                        if not is_photo:
+                            width, height, probed_duration = self._video_metadata(info, found_file)
+                            if probed_duration is not None:
+                                duration = probed_duration
                         return DownloadResult(
                             success=True,
                             file_path=found_file,
@@ -1277,6 +1616,8 @@ class VideoDownloader:
                             duration=duration,
                             is_photo=is_photo,
                             photo_paths=[found_file] if is_photo else None,
+                            width=width,
+                            height=height,
                             carousel_slides=carousel_slides,
                         )
                     return DownloadResult(
@@ -1361,7 +1702,10 @@ class VideoDownloader:
                     error="Требуется авторизация для просмотра этого видео",
                     error_code="downloader.error.auth_required",
                 )
-            elif "there is no video in this post" in error_msg_lower and is_instagram_url(url):
+            elif (
+                "there is no video in this post" in error_msg_lower
+                and is_instagram_photo_candidate_url(url)
+            ):
                 return DownloadResult(
                     success=False,
                     error="Не удалось скачать Instagram фото-пост: требуется авторизация Instagram",
