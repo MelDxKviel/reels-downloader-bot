@@ -6,8 +6,10 @@ Inline-mode загрузка видео.
 Если результат уже есть в кэше, карточка превращается в готовый файл и
 Telegram отправляет его моментально. Иначе карточка отправляется как
 текстовая "заглушка", а после выбора (chosen_inline_result) бот скачивает
-ролик, конвертирует при необходимости, публикует в storage-чат,
-получает оттуда file_id и подменяет текст на медиа через editMessageMedia.
+медиа, конвертирует при необходимости, публикует в storage-чат,
+получает оттуда file_id и подменяет текст через editMessageMedia. Instagram-
+карусель загружает все фото, затем подменяет заглушку через
+editMessageText(rich_message=<tg-slideshow>).
 
 ВАЖНО:
 - inline feedback у BotFather (`/setinlinefeedback → 100%`) должен быть включён,
@@ -16,10 +18,10 @@ Telegram отправляет его моментально. Иначе карт
   Telegram не присылает `inline_message_id` в chosen_inline_result, и сообщение
   невозможно отредактировать (`Available only if there is an inline keyboard
   attached to the message`).
-- Для загрузки новых медиа в inline-сообщения Telegram принимает только file_id
-  или URL (multipart запрещён). Поэтому файл сначала отправляется в storage-чат
-  (`VIDEO_STORAGE_CHAT_ID` или первый `ADMIN_USERS`), и только затем его file_id
-  подставляется в editMessageMedia.
+- Одиночное inline-медиа допускает file_id или публичный URL. Rich-карусель
+  строже: при inline-edit она принимает только заранее загруженные file_id
+  всех слайдов. Поэтому файлы сначала отправляются в storage-чат
+  (`VIDEO_STORAGE_CHAT_ID` или первый `ADMIN_USERS`).
 """
 
 import html
@@ -45,6 +47,7 @@ from aiogram.types import (
     InputTextMessageContent,
 )
 
+from src.bot.rich_carousel import edit_inline_rich_carousel
 from src.bot.telegram_retry import (
     TELEGRAM_UPLOAD_TIMEOUT,
     retry_transient_telegram,
@@ -159,11 +162,18 @@ async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Trans
     # --- Видео/фото ---
     # Фактический тип медиа берём из cache entry (is_photo), чтобы
     # залежавшийся file_id другого типа не переключал выдачу.
+    cached_carousel_slides = downloader.get_cached_carousel_slides(url)
     cached_media_type = downloader.get_cached_media_type(url)
     cached_photo_id = (
-        downloader.get_telegram_photo_file_id(url) if cached_media_type == "photo" else None
+        downloader.get_telegram_photo_file_id(url)
+        if cached_media_type == "photo" and not cached_carousel_slides
+        else None
     )
-    cached_video_id = downloader.get_telegram_file_id(url) if cached_media_type != "photo" else None
+    cached_video_id = (
+        downloader.get_telegram_file_id(url)
+        if cached_media_type != "photo" and not cached_carousel_slides
+        else None
+    )
     if cached_photo_id:
         results.append(
             InlineQueryResultCachedPhoto(
@@ -369,11 +379,19 @@ async def chosen_inline_handler(
     platform = downloader.get_platform_name(url)
     user_id = chosen.from_user.id
 
-    # Скачиваем видео (общий шаг для всех операций).
-    # allow_carousel=False: inline отдаёт одиночное медиа (видео/фото/MP3) и
-    # грузит file_path в storage — нужен реальный файл, а не URL-слайды карусели.
+    # Карусель из общего кэша можно сразу переиспользовать; для остальных inline
+    # загрузок общий кэш по-прежнему обходится, а временные файлы удаляются ниже.
     try:
-        result = await downloader.download(url, allow_carousel=False)
+        cached_result = downloader.get_from_cache(url) if operation == "download" else None
+        cached_slides = (
+            cached_result.carousel_slides
+            if cached_result is not None and isinstance(cached_result.carousel_slides, list)
+            else None
+        )
+        if cached_result is not None and cached_slides and len(cached_slides) >= 2:
+            result = cached_result
+        else:
+            result = await downloader.download(url, allow_carousel=False)
     except Exception as e:
         logger.error("Ошибка скачивания (inline): %s", e, exc_info=True)
         await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
@@ -388,11 +406,48 @@ async def chosen_inline_handler(
 
     try:
         if operation == "download" or operation == "s":
+            slides = result.carousel_slides if isinstance(result.carousel_slides, list) else None
+            if slides and len(slides) >= 2:
+                carousel_file_ids = None
+                photo_paths = result.photo_paths if result.is_photo else None
+                if (
+                    photo_paths
+                    and len(photo_paths) == len(slides)
+                    and not any(slide.is_video for slide in slides)
+                ):
+                    carousel_file_ids = await _upload_carousel_photos_and_get_file_ids(
+                        bot, photo_paths
+                    )
+                sent_as_carousel = await edit_inline_rich_carousel(
+                    bot,
+                    inline_message_id,
+                    slides,
+                    result.title,
+                    media_file_ids=carousel_file_ids,
+                )
+                if sent_as_carousel:
+                    await db.record_download(
+                        user_id=user_id,
+                        platform=platform,
+                        url=url,
+                        success=True,
+                    )
+                    logger.info(
+                        "✅ Inline rich-карусель отправлена (user: %s, url: %s)", user_id, url
+                    )
+                    return
+
             if result.is_photo:
-                # В inline Telegram не умеет редактировать сообщение в media group,
-                # поэтому для карусели отправляется только первый слайд.
                 await _handle_photo(
-                    bot, db, inline_message_id, url, platform, user_id, result.file_path, t
+                    bot,
+                    db,
+                    inline_message_id,
+                    url,
+                    platform,
+                    user_id,
+                    result.file_path,
+                    t,
+                    cache_file_id=not bool(slides and len(slides) >= 2),
                 )
             else:
                 await _handle_video(
@@ -422,10 +477,10 @@ async def chosen_inline_handler(
                 t,
             )
     finally:
-        # Inline downloads intentionally bypass the shared cache. Once Telegram
-        # has a reusable file_id (or the operation failed), the source file must
-        # be removed explicitly or it would never be reached by cache cleanup.
-        downloader.discard_result_files(result)
+        # Временные inline-загрузки не попадают в общий кэш и удаляются сразу.
+        # Результат карусели, взятый из общего кэша, принадлежит cache cleanup.
+        if not result.from_cache:
+            downloader.discard_result_files(result)
 
 
 async def _handle_video(
@@ -486,6 +541,8 @@ async def _handle_photo(
     user_id: int,
     file_path: str,
     t: Translator,
+    *,
+    cache_file_id: bool = True,
 ) -> None:
     """Загружает фото в storage и подменяет inline-заглушку."""
     file_id = await _upload_photo_and_get_file_id(bot, file_path)
@@ -494,7 +551,11 @@ async def _handle_photo(
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
-    downloader.set_telegram_photo_file_id(url, file_id)
+    # A temporary rich-message failure must not permanently flatten a carousel
+    # into its first photo on the next inline query.  Per-slide file IDs are not
+    # cached yet, so only cache the ID for genuine single-photo results.
+    if cache_file_id:
+        downloader.set_telegram_photo_file_id(url, file_id)
 
     try:
         await retry_transient_telegram(
@@ -513,6 +574,20 @@ async def _handle_photo(
 
     await db.record_download(user_id=user_id, platform=platform, url=url, success=True)
     logger.info("✅ Inline-фото отправлено (user: %s, url: %s)", user_id, url)
+
+
+async def _upload_carousel_photos_and_get_file_ids(
+    bot: Bot, photo_paths: list[str]
+) -> Optional[list[str]]:
+    """Pre-upload every carousel photo for an inline rich-message edit."""
+
+    file_ids: list[str] = []
+    for photo_path in photo_paths:
+        file_id = await _upload_photo_and_get_file_id(bot, photo_path)
+        if not file_id:
+            return None
+        file_ids.append(file_id)
+    return file_ids
 
 
 async def _handle_mp3(

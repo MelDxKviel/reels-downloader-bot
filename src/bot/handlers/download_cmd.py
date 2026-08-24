@@ -14,10 +14,11 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputMediaPhoto,
     Message,
 )
 
+from src.bot.handlers.download import _send_photo_paths
+from src.bot.rich_carousel import send_rich_carousel
 from src.bot.telegram_retry import (
     TELEGRAM_UPLOAD_TIMEOUT,
     retry_transient_telegram,
@@ -31,7 +32,6 @@ from src.services.url_utils import extract_url
 logger = logging.getLogger(__name__)
 
 router = Router()
-
 
 class DownloadStates(StatesGroup):
     waiting_for_url = State()
@@ -78,36 +78,36 @@ async def _download_and_send(
         )
         return
 
-    media_label = (
-        t("download.media_label.photo") if result.is_photo else t("download.media_label.video")
-    )
+    slides = result.carousel_slides if isinstance(result.carousel_slides, list) else None
+    if slides and len(slides) >= 2:
+        media_label = t("download.media_label.carousel")
+    elif result.is_photo:
+        media_label = t("download.media_label.photo")
+    else:
+        media_label = t("download.media_label.video")
     if result.from_cache:
         await status_msg.edit_text(t("download.from_cache_status", media_label=media_label))
     else:
         await status_msg.edit_text(t("download.send_status", media_label=media_label))
 
     try:
-        if result.is_photo:
+        sent_as_carousel = False
+        if slides and len(slides) >= 2 and message.bot is not None:
+            sent_as_carousel = await send_rich_carousel(
+                message.bot,
+                message.chat.id,
+                slides,
+                result.title,
+                media_paths=result.photo_paths if result.is_photo else None,
+            )
+
+        if not sent_as_carousel and result.is_photo:
             photo_paths = result.photo_paths or [result.file_path]
-            if len(photo_paths) > 1:
-                await retry_transient_telegram(
-                    lambda: message.answer_media_group(
-                        media=[InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths],
-                        request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
-                    ),
-                    "sendMediaGroup(user)",
-                )
-            else:
-                await retry_transient_telegram(
-                    lambda: message.answer_photo(
-                        photo=FSInputFile(photo_paths[0]),
-                        request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
-                    ),
-                    "sendPhoto(user)",
-                )
-        else:
+            await _send_photo_paths(message, photo_paths)
+        elif not sent_as_carousel:
             sent = await retry_transient_telegram(
-                lambda: message.answer_video(
+                lambda: message.bot.send_video(
+                    chat_id=message.chat.id,
                     video=FSInputFile(result.file_path),
                     duration=telegram_duration(result.duration),
                     width=result.width,

@@ -6,22 +6,22 @@ import html
 import logging
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     FSInputFile,
     InputMediaDocument,
     InputMediaPhoto,
-    InputRichMessage,
     Message,
 )
 
+from src.bot.rich_carousel import send_rich_carousel
 from src.bot.telegram_retry import (
     TELEGRAM_UPLOAD_TIMEOUT,
     retry_transient_telegram,
     telegram_duration,
 )
 from src.services.database import DatabaseService
-from src.services.downloader import CarouselSlide, DownloadResult, downloader
+from src.services.downloader import DownloadResult, downloader
 from src.services.i18n import Translator, translate_download_error
 from src.services.url_utils import extract_url
 
@@ -29,62 +29,55 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# Подпись карусели обрезается до разумной длины: og:title Instagram бывает
-# длинным ("username on Instagram: <весь текст поста>").
-_CAROUSEL_CAPTION_MAX = 1024
+_TELEGRAM_MEDIA_GROUP_MAX = 10
 
 
-def _build_slideshow_html(slides: list[CarouselSlide], caption: str | None = None) -> str:
-    """Собирает HTML нативной карусели Telegram (``<tg-slideshow>``, Bot API 10.1).
+async def _send_photo_paths(
+    message: Message, photo_paths: list[str], *, as_documents: bool = False
+) -> None:
+    """Send every fallback file, splitting legacy albums at Telegram's limit."""
 
-    В rich-сообщениях медиа задаётся ТОЛЬКО публичным http(s) URL (file_id и
-    multipart не поддерживаются), поэтому каждый слайд — это ``<img>``/``<video>``
-    с исходным URL Instagram CDN. URL и подпись экранируются как HTML.
-    """
-    parts = ["<tg-slideshow>"]
-    for slide in slides:
-        src = html.escape(slide.url, quote=True)
-        if getattr(slide, "is_video", False):
-            parts.append(f'<video src="{src}"/>')
-        else:
-            parts.append(f'<img src="{src}"/>')
-    if caption:
-        text = html.escape(caption.strip()[:_CAROUSEL_CAPTION_MAX])
-        if text:
-            parts.append(f"<figcaption>{text}</figcaption>")
-    parts.append("</tg-slideshow>")
-    return "".join(parts)
-
-
-async def _send_rich_carousel(
-    message: Message, slides: list[CarouselSlide], caption: str | None
-) -> bool:
-    """Отправляет слайды нативной каруселью Telegram (``sendRichMessage``).
-
-    Возвращает ``True`` при успехе. При любой ошибке (Bot API сервер без
-    поддержки rich-сообщений, Telegram не смог скачать URL и т.п.) возвращает
-    ``False`` — вызывающий код откатывается на отправку альбомом из локальных
-    файлов, поэтому в худшем случае поведение совпадает с прежним.
-    """
-    if message.bot is None:
-        return False
-    rich_html = _build_slideshow_html(slides, caption)
-    try:
-        await retry_transient_telegram(
-            lambda: message.bot.send_rich_message(
-                chat_id=message.chat.id,
-                rich_message=InputRichMessage(html=rich_html),
-                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
-            ),
-            "sendRichMessage(user)",
-        )
-        return True
-    except TelegramAPIError as e:
-        logger.warning("Rich-карусель не отправлена, фолбэк на альбом: %s", e)
-        return False
-    except Exception as e:  # фолбэк надёжнее падения хендлера
-        logger.warning("Rich-карусель: неожиданная ошибка, фолбэк на альбом: %s", e)
-        return False
+    for start in range(0, len(photo_paths), _TELEGRAM_MEDIA_GROUP_MAX):
+        chunk = photo_paths[start : start + _TELEGRAM_MEDIA_GROUP_MAX]
+        try:
+            if len(chunk) > 1:
+                media = (
+                    [InputMediaDocument(media=FSInputFile(path)) for path in chunk]
+                    if as_documents
+                    else [InputMediaPhoto(media=FSInputFile(path)) for path in chunk]
+                )
+                await retry_transient_telegram(
+                    lambda: message.bot.send_media_group(
+                        chat_id=message.chat.id,
+                        media=media,
+                        request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                    ),
+                    "sendMediaGroup(documents)" if as_documents else "sendMediaGroup(user)",
+                )
+            elif as_documents:
+                await retry_transient_telegram(
+                    lambda: message.bot.send_document(
+                        chat_id=message.chat.id,
+                        document=FSInputFile(chunk[0]),
+                        request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                    ),
+                    "sendDocument(user)",
+                )
+            else:
+                await retry_transient_telegram(
+                    lambda: message.bot.send_photo(
+                        chat_id=message.chat.id,
+                        photo=FSInputFile(chunk[0]),
+                        request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                    ),
+                    "sendPhoto(user)",
+                )
+        except TelegramBadRequest as exc:
+            if as_documents or "IMAGE_PROCESS_FAILED" not in str(exc):
+                raise
+            # Only retry the failed chunk. Earlier chunks have already been sent
+            # successfully and must not be duplicated as documents.
+            await _send_photo_paths(message, chunk, as_documents=True)
 
 
 @router.message(F.text)
@@ -136,13 +129,20 @@ async def handle_url(message: Message, db: DatabaseService, t: Translator) -> No
         else:
             await status_message.edit_text(t("download.send_status", media_label=media_label))
 
-        # 1) Нативная карусель Telegram (Bot API 10.1, <tg-slideshow>) — один
-        #    свайпаемый пост (фото и/или видео) вместо альбома-сетки. Медиа
-        #    задаётся публичными URL Instagram CDN, локальные файлы не нужны.
+        # 1) Нативная карусель Telegram (Bot API 10.2, <tg-slideshow>) — один
+        #    свайпаемый пост вместо альбома-сетки. Скачанные фото прикладываются
+        #    напрямую; публичные Instagram CDN URL остаются fallback-вариантом.
         slides = result.carousel_slides if isinstance(result.carousel_slides, list) else None
         sent_as_carousel = False
-        if slides and len(slides) >= 2:
-            sent_as_carousel = await _send_rich_carousel(message, slides, result.title)
+        if slides and len(slides) >= 2 and message.bot is not None:
+            media_paths = result.photo_paths if result.is_photo else None
+            sent_as_carousel = await send_rich_carousel(
+                message.bot,
+                message.chat.id,
+                slides,
+                result.title,
+                media_paths=media_paths,
+            )
 
         # 2) Фолбэк, если карусель не собрана или Telegram не смог её отправить
         #    (старый Bot API сервер, недоступный URL): отдаём скачанные файлы —
@@ -150,48 +150,11 @@ async def handle_url(message: Message, db: DatabaseService, t: Translator) -> No
         if not sent_as_carousel:
             if result.is_photo:
                 photo_paths = result.photo_paths or [result.file_path]
-                try:
-                    if len(photo_paths) > 1:
-                        await retry_transient_telegram(
-                            lambda: message.answer_media_group(
-                                media=[InputMediaPhoto(media=FSInputFile(p)) for p in photo_paths],
-                                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
-                            ),
-                            "sendMediaGroup(user)",
-                        )
-                    else:
-                        await retry_transient_telegram(
-                            lambda: message.answer_photo(
-                                photo=FSInputFile(photo_paths[0]),
-                                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
-                            ),
-                            "sendPhoto(user)",
-                        )
-                except TelegramBadRequest as e:
-                    if "IMAGE_PROCESS_FAILED" not in str(e):
-                        raise
-                    # Unsupported image format (e.g. WebP, HEIC) — send as file
-                    if len(photo_paths) > 1:
-                        await retry_transient_telegram(
-                            lambda: message.answer_media_group(
-                                media=[
-                                    InputMediaDocument(media=FSInputFile(p)) for p in photo_paths
-                                ],
-                                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
-                            ),
-                            "sendMediaGroup(documents)",
-                        )
-                    else:
-                        await retry_transient_telegram(
-                            lambda: message.answer_document(
-                                document=FSInputFile(photo_paths[0]),
-                                request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
-                            ),
-                            "sendDocument(user)",
-                        )
+                await _send_photo_paths(message, photo_paths)
             else:
                 sent = await retry_transient_telegram(
-                    lambda: message.answer_video(
+                    lambda: message.bot.send_video(
+                        chat_id=message.chat.id,
                         video=FSInputFile(result.file_path),
                         duration=telegram_duration(result.duration),
                         width=result.width,

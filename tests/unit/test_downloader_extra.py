@@ -1,5 +1,6 @@
 """Extra downloader tests to push coverage to 100%."""
 
+import json
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -275,11 +276,40 @@ def test_parse_instagram_html_og_image_secure_url_variant():
 
 
 def test_http_get_html_url_error():
-    with patch(
-        "src.services.downloader.urllib.request.urlopen",
-        side_effect=urllib.error.URLError("nope"),
+    with (
+        patch(
+            "src.services.downloader.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("nope"),
+        ) as urlopen,
+        patch("src.services.downloader.time.sleep") as sleep,
     ):
         assert VideoDownloader._http_get_html("https://x") is None
+    assert urlopen.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [1, 2]
+
+
+def test_http_get_html_retries_504_then_succeeds():
+    timeout = urllib.error.HTTPError(
+        "https://x", 504, "Gateway Timeout", hdrs=None, fp=None
+    )
+    fake = MagicMock()
+    fake.headers = {"Content-Type": "text/html"}
+    fake.read = MagicMock(return_value=b"<html>ok</html>")
+    fake.__enter__ = MagicMock(return_value=fake)
+    fake.__exit__ = MagicMock(return_value=False)
+
+    with (
+        patch(
+            "src.services.downloader.urllib.request.urlopen",
+            side_effect=[timeout, fake],
+        ) as urlopen,
+        patch("src.services.downloader.time.sleep") as sleep,
+    ):
+        result = VideoDownloader._http_get_html("https://x")
+
+    assert result == "<html>ok</html>"
+    assert urlopen.call_count == 2
+    sleep.assert_called_once_with(1)
 
 
 def test_http_get_html_non_html_content_type():
@@ -403,14 +433,130 @@ def test_fetch_instagram_media_info_aggregates_multiple_endpoints(tmp_path):
     assert result is not None
 
 
+def test_fetch_instagram_media_info_prefers_more_complete_target_mirror(tmp_path):
+    d = make_d(tmp_path)
+    embed_html = (
+        '{"media_type":1,"image_versions2":{"candidates":['
+        '{"url":"https://safe.example/embed.jpg","width":1080,"height":1350}]}}'
+    )
+    main_html = "\n".join(
+        f'<meta property="og:image" content="https://unsafe.example/recommendation{i}.jpg">'
+        for i in range(3)
+    )
+    mirror_urls = ["https://safe.example/one.jpg", "https://safe.example/two.jpg"]
+    mirror_html = "\n".join(f'<meta property="og:image" content="{url}">' for url in mirror_urls)
+
+    def fake_get(candidate, **_kwargs):
+        if "kkinstagram" in candidate:
+            return mirror_html
+        if "/embed" in candidate:
+            return embed_html
+        return main_html
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result["image_urls"] == mirror_urls
+    assert result["media_kind"] == "photo"
+
+
+def test_fetch_instagram_media_info_counts_distinct_assets_per_source(tmp_path):
+    d = make_d(tmp_path)
+    one_asset = "https://safe.example/one.jpg"
+    embed_html = (
+        f'<meta property="og:image" content="{one_asset}?full=1">'
+        f'<meta property="og:image" content="{one_asset}?stp=s1080x1080">'
+        '{"media_type":1}'
+    )
+    mirror_urls = ["https://safe.example/a.jpg", "https://safe.example/b.jpg"]
+    mirror_html = "".join(
+        f'<meta property="og:image" content="{image_url}">' for image_url in mirror_urls
+    )
+
+    def fake_get(candidate, **_kwargs):
+        if "kkinstagram" in candidate:
+            return mirror_html
+        if "/embed" in candidate:
+            return embed_html
+        return None
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result["image_urls"] == mirror_urls
+
+
+def test_fetch_instagram_media_info_scopes_main_page_to_shortcode(tmp_path):
+    d = make_d(tmp_path)
+    target_urls = [
+        "https://safe.example/target1.jpg?a=1&b=2",
+        "https://safe.example/target2.jpg",
+        "https://safe.example/target3.jpg",
+    ]
+    embed_html = (
+        '{"media_type":1,"image_versions2":{"candidates":['
+        f'{{"url":"{target_urls[0]}","width":1080,"height":1350}}]}}'
+    )
+    def media(image_url):
+        return {
+            "media_type": 1,
+            "image_versions2": {
+                "candidates": [{"url": image_url, "width": 1080, "height": 1350}]
+            },
+        }
+
+    main_html = '<script type="application/json">' + json.dumps(
+        {
+            "items": [
+                {"code": "abc", "media_type": 8, "carousel_media": [media(target_urls[0])]},
+                {
+                    "code": "abc",
+                    "media_type": 8,
+                    "caption": {"text": 'say "hi" {still-json}'},
+                    "carousel_media": [media(image_url) for image_url in target_urls],
+                },
+            ],
+            "recommendations": [{"code": "other", **media("https://unsafe.example/rec.jpg")}],
+        }
+    ).replace("&", r"\u0026") + "</script>"
+
+    def fake_get(candidate, **_kwargs):
+        if "/embed" in candidate:
+            return embed_html
+        if "kkinstagram" in candidate:
+            return None
+        return main_html
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result["image_urls"] == target_urls
+    assert result["media_kind"] == "photo"
+
+
 def test_fetch_instagram_media_info_max_carousel(tmp_path):
     d = make_d(tmp_path)
     images = "\n".join(
-        f'<meta property="og:image" content="https://cdn.example/img{i}.jpg">' for i in range(12)
+        f'<meta property="og:image" content="https://cdn.example/img{i}.jpg">' for i in range(25)
     )
     with patch.object(d, "_http_get_html", return_value=images):
         result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
-    assert len(result["image_urls"]) <= 10
+    assert len(result["image_urls"]) == 20
+
+
+def test_limit_instagram_image_variants_counts_slides_not_signed_urls(tmp_path):
+    d = make_d(tmp_path)
+    urls = [
+        f"https://cdn.example/slide{index}.jpg?variant={variant}"
+        for index in range(25)
+        for variant in ("full", "resized")
+    ]
+
+    limited = d._limit_instagram_image_variants(urls)
+
+    assert len(limited) == 40
+    assert limited[:2] == urls[:2]
+    assert all("slide20.jpg" not in url for url in limited)
 
 
 # ── _download_image_sync ─────────────────────────────────────────────────────
@@ -474,12 +620,41 @@ def test_download_image_sync_rejects_non_image(tmp_path):
 
 def test_download_image_sync_url_error(tmp_path):
     d = make_d(tmp_path)
-    with patch(
-        "src.services.downloader.urllib.request.urlopen",
-        side_effect=urllib.error.URLError("nope"),
+    with (
+        patch(
+            "src.services.downloader.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("nope"),
+        ) as urlopen,
+        patch("src.services.downloader.time.sleep") as sleep,
     ):
         out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
     assert out is None
+    assert urlopen.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [1, 2]
+
+
+def test_download_image_sync_retries_http_504(tmp_path):
+    d = make_d(tmp_path)
+    gateway_timeout = urllib.error.HTTPError(
+        "https://cdn/img",
+        504,
+        "Gateway Timeout",
+        hdrs=None,
+        fp=None,
+    )
+    fake = _make_fake_resp("image/jpeg")
+    with (
+        patch(
+            "src.services.downloader.urllib.request.urlopen",
+            side_effect=[gateway_timeout, fake],
+        ) as urlopen,
+        patch("src.services.downloader.time.sleep") as sleep,
+    ):
+        out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
+
+    assert out is not None
+    assert urlopen.call_count == 2
+    sleep.assert_called_once_with(1)
 
 
 def test_download_image_sync_rejects_tiny_file(tmp_path):
@@ -665,6 +840,24 @@ def test_try_instagram_photo_no_downloads(tmp_path):
             assert d._try_instagram_photo("https://www.instagram.com/p/abc/") is None
 
 
+def test_try_instagram_photo_rejects_incomplete_carousel_and_cleans_files(tmp_path):
+    d = make_d(tmp_path)
+    urls = [
+        "https://scontent.cdninstagram.com/v/t51/one.jpg",
+        "https://scontent.cdninstagram.com/v/t51/two.jpg",
+    ]
+    first = fake_file(tmp_path, "first.jpg")
+    meta = {"image_urls": urls, "has_video": False, "media_kind": "photo"}
+    with (
+        patch.object(d, "_fetch_instagram_media_info", return_value=meta),
+        patch.object(d, "_download_image_sync", side_effect=[str(first), None]),
+    ):
+        result = d._try_instagram_photo("https://www.instagram.com/p/abc/")
+
+    assert result is None
+    assert not first.exists()
+
+
 def test_try_instagram_photo_groups_variants(tmp_path):
     d = make_d(tmp_path)
     base = "https://scontent.cdninstagram.com/v/t51/photo.jpg"
@@ -709,7 +902,7 @@ async def test_download_does_not_trust_global_instagram_photo_marker(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_download_short_circuits_target_scoped_instagram_photo(tmp_path):
+async def test_download_probes_single_target_photo_then_keeps_confirmed_fallback(tmp_path):
     d = make_d(tmp_path)
     photo = fake_file(tmp_path, "confirmed.jpg")
     photo_result = DownloadResult(
@@ -721,13 +914,17 @@ async def test_download_short_circuits_target_scoped_instagram_photo(tmp_path):
     )
     with (
         patch.object(d, "_try_instagram_photo", return_value=photo_result),
-        patch.object(d, "_download_sync") as download_sync,
+        patch.object(
+            d,
+            "_download_sync",
+            return_value=DownloadResult(success=False, error_code="downloader.error.download_failed"),
+        ) as download_sync,
     ):
         result = await d.download("https://www.instagram.com/p/abc/")
 
     assert result.is_photo
     assert photo.exists()
-    download_sync.assert_not_called()
+    download_sync.assert_called_once()
 
 
 @pytest.mark.asyncio

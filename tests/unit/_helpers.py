@@ -31,6 +31,11 @@ def make_message(text: str = "", user_id: int = 100, chat_id: int = 100):
     msg.bot.get_file = AsyncMock()
     msg.bot.download_file = AsyncMock()
     msg.bot.delete_message = AsyncMock()
+    msg.bot.send_video = AsyncMock()
+    msg.bot.send_photo = AsyncMock()
+    msg.bot.send_media_group = AsyncMock()
+    msg.bot.send_document = AsyncMock()
+    msg.bot.send_rich_message = AsyncMock()
     return msg
 
 

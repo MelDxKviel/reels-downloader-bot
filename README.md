@@ -175,12 +175,12 @@ In any chat (even where the bot isn't a member), type:
 @bot_name https://www.youtube.com/shorts/XXXXXXXXXXX
 ```
 
-Telegram will show a result card — select it and the video will be sent to the current chat under your name. Videos already in the cache are delivered instantly. New URLs first show a "⏳ Loading…" placeholder that is replaced with the video once downloaded.
+Telegram will show a result card — select it and the media will be sent to the current chat under your name. Instagram photo carousels are delivered as native swipeable rich-message slideshows, including inline mode. Cached videos are delivered instantly. New URLs first show a "⏳ Loading…" placeholder that is replaced once downloaded.
 
 > ⚙️ For the deferred scenario to work:
 > - Enable inline mode in BotFather (`/setinline`)
 > - Enable inline feedback (`/setinlinefeedback → 100%`)
-> - Set `VIDEO_STORAGE_CHAT_ID` (any chat/channel where the bot can send and delete messages). Telegram doesn't allow uploading new files directly into inline messages — the bot first publishes the video to the storage chat, retrieves the `file_id`, inserts it into the inline card, and deletes the intermediate message. If `VIDEO_STORAGE_CHAT_ID` is not set, the fallback is the first admin's DM (`ADMIN_USERS[0]`).
+> - Set `VIDEO_STORAGE_CHAT_ID` (any chat/channel where the bot can send and delete messages). Telegram doesn't allow uploading new files directly during an inline edit, so the bot first publishes media to the storage chat, retrieves reusable `file_id` values, inserts them into the inline video/photo or rich carousel, and deletes the intermediate messages. If `VIDEO_STORAGE_CHAT_ID` is not set, the fallback is the first admin's DM (`ADMIN_USERS[0]`).
 >
 > The whitelist also applies to inline queries: users not on the list will receive an empty response.
 

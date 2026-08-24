@@ -1,5 +1,5 @@
 """
-Tests for the native Instagram → Telegram rich carousel (Bot API 10.1
+Tests for the native Instagram → Telegram rich carousel (Bot API 10.2
 ``<tg-slideshow>``): slide-URL extraction, caching round-trip, and HTML builder.
 """
 
@@ -8,8 +8,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from aiogram.types import FSInputFile
 
-from src.bot.handlers.download import _build_slideshow_html
+from src.bot.rich_carousel import (
+    build_slideshow_html as _build_slideshow_html,
+)
+from src.bot.rich_carousel import (
+    rich_carousel_variants,
+)
 from src.services.downloader import CarouselSlide, DownloadResult, VideoDownloader
 from src.services.url_utils import is_twitter_url
 
@@ -109,6 +115,7 @@ def test_carousel_slides_survive_cache_roundtrip(tmp_path: Path):
     assert got is not None
     assert got.carousel_slides is not None
     assert [s.url for s in got.carousel_slides] == [_cdn("1"), _cdn("2")]
+    assert d.get_cached_carousel_slides(url) is not None
 
     # A fresh instance must reload the slides from the JSON cache file.
     reloaded = VideoDownloader(str(tmp_path))
@@ -116,6 +123,37 @@ def test_carousel_slides_survive_cache_roundtrip(tmp_path: Path):
     assert got2 is not None
     assert got2.carousel_slides is not None
     assert len(got2.carousel_slides) == 2
+
+
+def test_cached_carousel_is_atomic_when_one_local_slide_disappears(tmp_path: Path):
+    d = VideoDownloader(str(tmp_path))
+    paths = [tmp_path / "a.jpg", tmp_path / "b.jpg"]
+    for path in paths:
+        path.write_bytes(b"x" * 2048)
+    url = "https://www.instagram.com/p/ATOMIC/"
+    d.add_to_cache(
+        url,
+        DownloadResult(
+            success=True,
+            file_path=str(paths[0]),
+            is_photo=True,
+            photo_paths=[str(path) for path in paths],
+            carousel_slides=[CarouselSlide(_cdn("1")), CarouselSlide(_cdn("2"))],
+        ),
+    )
+    d.set_telegram_photo_file_id(url, "first-only")
+    d.set_telegram_mp3_file_id(url, "mp3-still-valid")
+    paths[1].unlink()
+
+    assert d.get_from_cache(url) is None
+    assert not paths[0].exists()
+    assert d.get_cached_carousel_slides(url) is None
+    assert d.get_telegram_photo_file_id(url) is None
+    assert d.get_telegram_mp3_file_id(url) == "mp3-still-valid"
+
+    restarted = VideoDownloader(str(tmp_path))
+    assert restarted.get_from_cache(url) is None
+    assert restarted.get_telegram_mp3_file_id(url) == "mp3-still-valid"
 
 
 def test_deserialize_carousel_slides_needs_two():
@@ -156,6 +194,37 @@ def test_build_slideshow_html_video_slide_and_no_caption():
     assert '<img src="https://cdn/1.jpg"/>' in out
     assert '<video src="https://cdn/v.mp4"/>' in out
     assert "<figcaption>" not in out
+
+
+def test_rich_carousel_upload_variant_attaches_all_local_photos(tmp_path: Path):
+    paths = [tmp_path / "1.jpg", tmp_path / "2.jpg"]
+    for path in paths:
+        path.write_bytes(b"x")
+    slides = [CarouselSlide(_cdn("1")), CarouselSlide(_cdn("2"))]
+
+    variants = rich_carousel_variants(
+        slides,
+        "Caption",
+        media_paths=[str(path) for path in paths],
+    )
+
+    assert len(variants) == 2  # multipart first, public Instagram URLs second
+    uploaded = variants[0]
+    assert uploaded.media is not None
+    assert [item.id for item in uploaded.media] == ["slide_1", "slide_2"]
+    assert all(isinstance(item.media.media, FSInputFile) for item in uploaded.media)
+    assert 'src="tg://photo?id=slide_1"' in uploaded.html
+    assert 'src="tg://photo?id=slide_2"' in uploaded.html
+
+
+def test_rich_carousel_file_id_variant_is_inline_safe():
+    slides = [CarouselSlide(_cdn("1")), CarouselSlide(_cdn("2"))]
+
+    variants = rich_carousel_variants(slides, media_file_ids=["file_1", "file_2"])
+
+    attached = variants[0]
+    assert attached.media is not None
+    assert [item.media.media for item in attached.media] == ["file_1", "file_2"]
 
 
 # ── /p/ routing: ambiguous covers are verified by yt-dlp ─────────────────────
@@ -467,6 +536,183 @@ async def test_download_instagram_carousel_harvests_video_slides(tmp_path: Path)
     assert result.title == "My mixed carousel"
     # A concrete local file remains as the album/video fallback.
     assert result.file_path == str(first_file)
+
+
+@pytest.mark.asyncio
+async def test_download_instagram_photo_playlist_keeps_every_local_file(tmp_path: Path):
+    """The yt-dlp template must not overwrite same-extension carousel entries."""
+
+    d = VideoDownloader(str(tmp_path))
+    url = "https://www.instagram.com/p/PHOTOS/"
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=True):
+            assert "%(id)s" in self.opts["outtmpl"]
+            for media_id in ("first", "second"):
+                path = self.opts["outtmpl"].replace("%(id)s", media_id).replace("%(ext)s", "jpg")
+                Path(path).write_bytes(media_id.encode() * 1024)
+                for hook in self.opts["progress_hooks"]:
+                    hook({"status": "finished", "filename": path})
+            return {
+                "title": "Photos",
+                "entries": [
+                    {
+                        "id": "first",
+                        "ext": "jpg",
+                        "vcodec": "none",
+                        "formats": [{"url": "https://cdn/first.jpg", "width": 1080}],
+                    },
+                    {
+                        "id": "second",
+                        "ext": "jpg",
+                        "vcodec": "none",
+                        "formats": [{"url": "https://cdn/second.jpg", "width": 1080}],
+                    },
+                ],
+            }
+
+        def prepare_filename(self, info):
+            return self.opts["outtmpl"].replace("%(id)s", info["id"]).replace("%(ext)s", "jpg")
+
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL),
+    ):
+        result = await d.download(url, allow_carousel=False)
+
+    assert result.success
+    assert result.is_photo
+    assert len(result.photo_paths) == 2
+    assert [Path(path).stem.rsplit("_", 1)[-1] for path in result.photo_paths] == [
+        "first",
+        "second",
+    ]
+    assert [slide.url for slide in result.carousel_slides] == [
+        "https://cdn/first.jpg",
+        "https://cdn/second.jpg",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mixed_playlist_cleanup_removes_every_downloaded_file(tmp_path: Path):
+    """Discarding a mixed result must not leave non-primary playlist files behind."""
+
+    d = VideoDownloader(str(tmp_path))
+    d.has_ffmpeg = False
+    url = "https://www.instagram.com/p/MIXED-CLEANUP/"
+    photo = tmp_path / "mixed-photo.jpg"
+    video = tmp_path / "mixed-video.mp4"
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=True):
+            photo.write_bytes(b"p" * 2048)
+            video.write_bytes(b"v" * 2048)
+            for path in (photo, video):
+                for hook in self.opts["progress_hooks"]:
+                    hook({"status": "finished", "filename": str(path)})
+            return {
+                "title": "Mixed",
+                "entries": [
+                    {
+                        "id": "photo",
+                        "ext": "jpg",
+                        "vcodec": "none",
+                        "formats": [
+                            {
+                                "url": "https://cdn/photo.jpg",
+                                "vcodec": "none",
+                                "width": 1080,
+                            }
+                        ],
+                    },
+                    {
+                        "id": "video",
+                        "ext": "mp4",
+                        "vcodec": "h264",
+                        "acodec": "aac",
+                        "width": 720,
+                        "height": 1280,
+                        "duration": 5,
+                        "formats": [
+                            {
+                                "url": "https://cdn/video.mp4",
+                                "vcodec": "h264",
+                                "acodec": "aac",
+                                "height": 1280,
+                            }
+                        ],
+                    },
+                ],
+            }
+
+        def prepare_filename(self, _info):
+            return str(video)
+
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL),
+    ):
+        result = await d.download(url, allow_carousel=False)
+
+    assert result.success
+    assert result.file_path == str(video)
+    d.discard_result_files(result)
+    assert not photo.exists()
+    assert not video.exists()
+
+
+@pytest.mark.asyncio
+async def test_playlist_download_error_removes_finished_partial_files(tmp_path: Path):
+    """A later playlist failure must clean entries reported finished by yt-dlp."""
+
+    from yt_dlp.utils import DownloadError
+
+    d = VideoDownloader(str(tmp_path))
+    url = "https://www.instagram.com/p/PARTIAL-CLEANUP/"
+    partial = tmp_path / "finished-before-504.jpg"
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=True):
+            partial.write_bytes(b"p" * 2048)
+            for hook in self.opts["progress_hooks"]:
+                hook({"status": "finished", "filename": str(partial)})
+            raise DownloadError("HTTP Error 504: Gateway Timeout")
+
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=None),
+        patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL),
+    ):
+        result = await d.download(url, allow_carousel=False)
+
+    assert not result.success
+    assert not partial.exists()
 
 
 # ── X/Twitter carousels ───────────────────────────────────────────────────────

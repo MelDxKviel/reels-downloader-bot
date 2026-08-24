@@ -6,7 +6,7 @@ import pytest
 from aiogram.exceptions import TelegramServerError
 
 from src.bot.handlers import download_cmd as dc
-from src.services.downloader import DownloadResult
+from src.services.downloader import CarouselSlide, DownloadResult
 from src.services.i18n import Translator
 
 from ._helpers import make_callback, make_db, make_message, make_state, make_status_message
@@ -33,7 +33,7 @@ async def test_cmd_download_with_url_starts_download(tmp_path):
     sent = MagicMock()
     sent.video = MagicMock()
     sent.video.file_id = "fid"
-    msg.answer_video.return_value = sent
+    msg.bot.send_video.return_value = sent
 
     result = DownloadResult(
         success=True,
@@ -46,8 +46,9 @@ async def test_cmd_download_with_url_starts_download(tmp_path):
     with patch.object(dc.downloader, "download", AsyncMock(return_value=result)):
         await dc.cmd_download(msg, state, db, Translator("en"))
 
-    msg.answer_video.assert_awaited()
-    kwargs = msg.answer_video.await_args.kwargs
+    msg.bot.send_video.assert_awaited()
+    kwargs = msg.bot.send_video.await_args.kwargs
+    assert kwargs["chat_id"] == msg.chat.id
     assert (kwargs["width"], kwargs["height"], kwargs["duration"]) == (720, 1280, 7)
     assert kwargs["request_timeout"] == 180
 
@@ -61,7 +62,7 @@ async def test_download_command_retries_transient_telegram_504(tmp_path):
     video.write_bytes(b"x")
     sent = MagicMock()
     sent.video = MagicMock(file_id="fid")
-    msg.answer_video.side_effect = [
+    msg.bot.send_video.side_effect = [
         TelegramServerError(method=MagicMock(), message="Gateway Timeout (504)"),
         sent,
     ]
@@ -73,7 +74,7 @@ async def test_download_command_retries_transient_telegram_504(tmp_path):
     ):
         await dc._download_and_send(msg, db, sm, "https://youtube.com/watch?v=a", Translator("en"))
 
-    assert msg.answer_video.await_count == 2
+    assert msg.bot.send_video.await_count == 2
     sleep.assert_awaited_once_with(1.0)
     db.record_download.assert_awaited()
 
@@ -111,7 +112,7 @@ async def test_download_and_send_photo_single(tmp_path):
     )
     with patch.object(dc.downloader, "download", AsyncMock(return_value=result)):
         await dc._download_and_send(msg, db, sm, "https://www.instagram.com/p/x/", Translator("en"))
-    msg.answer_photo.assert_awaited()
+    msg.bot.send_photo.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -128,7 +129,41 @@ async def test_download_and_send_photo_carousel(tmp_path):
     )
     with patch.object(dc.downloader, "download", AsyncMock(return_value=result)):
         await dc._download_and_send(msg, db, sm, "https://www.instagram.com/p/x/", Translator("en"))
-    msg.answer_media_group.assert_awaited()
+    msg.bot.send_media_group.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_download_command_photo_carousel_prefers_rich_message(tmp_path):
+    msg = make_message()
+    msg.bot.send_rich_message = AsyncMock()
+    sm = make_status_message()
+    db = make_db()
+    p1 = tmp_path / "p1.jpg"
+    p1.write_bytes(b"x")
+    p2 = tmp_path / "p2.jpg"
+    p2.write_bytes(b"x")
+    result = DownloadResult(
+        success=True,
+        file_path=str(p1),
+        is_photo=True,
+        photo_paths=[str(p1), str(p2)],
+        carousel_slides=[
+            CarouselSlide("https://cdn/1.jpg"),
+            CarouselSlide("https://cdn/2.jpg"),
+        ],
+    )
+
+    with patch.object(dc.downloader, "download", AsyncMock(return_value=result)):
+        await dc._download_and_send(
+            msg,
+            db,
+            sm,
+            "https://www.instagram.com/p/x/",
+            Translator("en"),
+        )
+
+    msg.bot.send_rich_message.assert_awaited_once()
+    msg.bot.send_media_group.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -141,7 +176,7 @@ async def test_download_and_send_video_with_cache(tmp_path):
     sent = MagicMock()
     sent.video = MagicMock()
     sent.video.file_id = "fid"
-    msg.answer_video.return_value = sent
+    msg.bot.send_video.return_value = sent
     result = DownloadResult(success=True, file_path=str(video), from_cache=True)
     with patch.object(dc.downloader, "download", AsyncMock(return_value=result)):
         await dc._download_and_send(msg, db, sm, "https://youtube.com/watch?v=a", Translator("en"))
@@ -155,7 +190,7 @@ async def test_download_and_send_send_exception(tmp_path):
     db = make_db()
     video = tmp_path / "v.mp4"
     video.write_bytes(b"x")
-    msg.answer_video.side_effect = RuntimeError("send failed")
+    msg.bot.send_video.side_effect = RuntimeError("send failed")
     result = DownloadResult(success=True, file_path=str(video))
     with patch.object(dc.downloader, "download", AsyncMock(return_value=result)):
         await dc._download_and_send(msg, db, sm, "https://youtube.com/watch?v=a", Translator("en"))
@@ -200,7 +235,7 @@ async def test_download_got_url_with_url(tmp_path):
     sent = MagicMock()
     sent.video = MagicMock()
     sent.video.file_id = "fid"
-    msg.answer_video.return_value = sent
+    msg.bot.send_video.return_value = sent
     result = DownloadResult(success=True, file_path=str(video))
     with patch.object(dc.downloader, "download", AsyncMock(return_value=result)):
         await dc.download_got_url(msg, state, db, Translator("en"))
@@ -221,7 +256,7 @@ async def test_download_got_url_delete_message_exception(tmp_path):
     sent = MagicMock()
     sent.video = MagicMock()
     sent.video.file_id = "fid"
-    msg.answer_video.return_value = sent
+    msg.bot.send_video.return_value = sent
     result = DownloadResult(success=True, file_path=str(video))
     with patch.object(dc.downloader, "download", AsyncMock(return_value=result)):
         await dc.download_got_url(msg, state, db, Translator("en"))

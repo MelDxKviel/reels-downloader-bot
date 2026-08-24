@@ -45,11 +45,10 @@ TELEGRAM_BOT_USER_AGENT = "TelegramBot (like TwitterBot)"
 _IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".mkv", ".m4v"})
 
-# v1 cache entries could contain an Instagram video thumbnail marked as a photo
-# (and a Telegram file_id created with the wrong preview geometry).  Media cache
-# entries are disposable, so old photo/video fields are lazily discarded while
-# unrelated cached MP3 file_ids are preserved.
-_MEDIA_CACHE_VERSION = 2
+# Older entries can contain a wrong Instagram thumbnail or a carousel truncated
+# to the legacy 10-item album limit. Media cache entries are disposable, so old
+# photo/video fields are lazily discarded while unrelated MP3 file IDs survive.
+_MEDIA_CACHE_VERSION = 3
 
 
 def _download_retry_delay(n: int) -> float:
@@ -70,9 +69,9 @@ BROWSER_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
-# Telegram media groups accept от 2 до 10 элементов — карусели Instagram
-# могут содержать до 20 слайдов, остальные отбрасываем.
-MAX_CAROUSEL_ITEMS = 10
+# Rich-message slideshows support more media than a legacy media group, so keep
+# the complete Instagram carousel instead of truncating it to the album limit.
+MAX_CAROUSEL_ITEMS = 20
 
 # Суффиксы хостов, с которых приходят настоящие Instagram-ассеты (scontent*).
 # Простая проверка "scontent" in host ловила бы произвольный домен вроде
@@ -89,12 +88,10 @@ def _is_instagram_cdn_host(hostname: Optional[str]) -> bool:
 
 @dataclass
 class CarouselSlide:
-    """Слайд карусели Instagram для нативной rich-карусели (Bot API 10.1).
+    """Ordered source media for a native Telegram rich-message slideshow.
 
-    Rich-сообщения (``sendRichMessage`` / ``<tg-slideshow>``) принимают медиа
-    ТОЛЬКО как публичные http(s) URL — file_id и multipart-загрузка не
-    поддерживаются. Поэтому слайд хранит исходный URL ассета Instagram CDN
-    (его и подставит Telegram), а не локальный путь к файлу.
+    The URL is retained for the public-URL fallback. Bot API 10.2 can otherwise
+    attach downloaded files (regular messages) or pre-uploaded file IDs (inline).
     """
 
     url: str
@@ -238,7 +235,12 @@ class VideoDownloader:
     def _prune_missing_local_media(self, url_hash: str, entry: dict) -> None:
         """Drop stale local fields without losing still-valid Telegram IDs."""
 
-        self._clear_local_media_fields(entry)
+        was_carousel = self._deserialize_carousel_slides(entry.get("carousel_slides")) is not None
+        self._clear_local_media_fields(entry, delete_files=True)
+        if was_carousel:
+            # A first-slide ID is not a valid substitute for the vanished full
+            # carousel and would flatten the next inline result permanently.
+            entry.pop("telegram_photo_file_id", None)
         has_telegram_id = any(
             isinstance(entry.get(key), str) and bool(entry.get(key))
             for key in (
@@ -271,8 +273,9 @@ class VideoDownloader:
             is_photo = bool(cached.get("is_photo", False))
 
             if is_photo and isinstance(photo_paths_raw, list) and photo_paths_raw:
-                existing = [p for p in photo_paths_raw if isinstance(p, str) and os.path.exists(p)]
-                if existing:
+                declared = [p for p in photo_paths_raw if isinstance(p, str) and p]
+                existing = [p for p in declared if os.path.exists(p)]
+                if declared and len(existing) == len(declared) == len(photo_paths_raw):
                     return DownloadResult(
                         success=True,
                         file_path=existing[0],
@@ -429,6 +432,14 @@ class VideoDownloader:
             return "photo"
         return None
 
+    def get_cached_carousel_slides(self, url: str) -> Optional[list]:
+        """Return ordered cached rich-carousel slides, if the URL is a carousel."""
+
+        entry = self._current_media_entry(url)
+        if not entry:
+            return None
+        return self._deserialize_carousel_slides(entry.get("carousel_slides"))
+
     def get_telegram_photo_file_id(self, url: str) -> Optional[str]:
         """Возвращает сохранённый Telegram photo file_id для URL, если есть."""
         entry = self._current_media_entry(url)
@@ -549,6 +560,133 @@ class VideoDownloader:
             logger.warning("Не удалось загрузить Instagram cookies для HTML-скрапинга: %s", e)
             return None
 
+    @staticmethod
+    def _instagram_image_key(image_url: str) -> str:
+        """Group signed/resized variants that point to the same Instagram asset."""
+
+        parsed = urlparse(image_url)
+        return f"{parsed.hostname or ''}{parsed.path}"
+
+    @classmethod
+    def _limit_instagram_image_variants(cls, image_urls: list[str]) -> list[str]:
+        """Keep variants for the first N distinct slides without truncating slides."""
+
+        selected_keys: set[str] = set()
+        selected_urls: list[str] = []
+        for image_url in image_urls:
+            key = cls._instagram_image_key(image_url)
+            if key not in selected_keys:
+                if len(selected_keys) >= MAX_CAROUSEL_ITEMS:
+                    continue
+                selected_keys.add(key)
+            selected_urls.append(image_url)
+        return selected_urls
+
+    @classmethod
+    def _instagram_slide_count(cls, image_urls: list[str]) -> int:
+        """Count distinct assets instead of signed/resized URL variants."""
+
+        return len({cls._instagram_image_key(image_url) for image_url in image_urls})
+
+    @classmethod
+    def _extract_instagram_target_payload(
+        cls, html: str, shortcode: Optional[str]
+    ) -> Optional[str]:
+        """Return the most complete JSON object belonging to ``shortcode``.
+
+        Instagram's main page can contain media for recommendations as well as
+        the requested post. Only dictionaries whose *own* ``shortcode``/``code``
+        field matches are candidates; enclosing feed objects are never trusted.
+        """
+
+        if not shortcode:
+            return None
+        # Keep JSON escaping intact. In particular, blindly replacing ``\"``
+        # corrupts perfectly valid captions containing quotes and can make the
+        # complete target script impossible to parse.
+        probe = html_lib.unescape(html)
+        target_nodes: list[dict] = []
+
+        def visit(value: object) -> None:
+            if isinstance(value, dict):
+                if value.get("shortcode") == shortcode or value.get("code") == shortcode:
+                    target_nodes.append(value)
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+            elif isinstance(value, str):
+                stripped = value.strip()
+                if shortcode in stripped and stripped[:1] in {"{", "["}:
+                    try:
+                        visit(json.loads(stripped))
+                    except (ValueError, json.JSONDecodeError):
+                        pass
+
+        json_sources = re.findall(
+            r"<script[^>]*>(.*?)</script>", probe, re.IGNORECASE | re.DOTALL
+        )
+        stripped_probe = probe.strip()
+        if stripped_probe[:1] in {"{", "["}:
+            json_sources.append(stripped_probe)
+        for source in json_sources:
+            try:
+                visit(json.loads(source.strip()))
+            except (ValueError, json.JSONDecodeError):
+                continue
+
+        # Some pages wrap JSON in JavaScript assignments. Fall back to balanced
+        # object extraction, but still accept only an object's own exact field.
+        marker = re.compile(rf'"(?:shortcode|code)"\s*:\s*"{re.escape(shortcode)}"')
+        for match in marker.finditer(probe):
+            stack: list[int] = []
+            in_string = False
+            escaped = False
+            for index, char in enumerate(probe):
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                    continue
+                if char == '"':
+                    in_string = True
+                elif char == "{":
+                    stack.append(index)
+                elif char == "}" and stack:
+                    start = stack.pop()
+                    if start <= match.start() < index:
+                        payload = probe[start : index + 1]
+                        try:
+                            node = json.loads(payload)
+                        except (ValueError, json.JSONDecodeError):
+                            continue
+                        if isinstance(node, dict) and (
+                            node.get("shortcode") == shortcode or node.get("code") == shortcode
+                        ):
+                            target_nodes.append(node)
+
+        if not target_nodes:
+            return None
+
+        def completeness(node: dict) -> tuple[int, int]:
+            carousel_media = node.get("carousel_media")
+            carousel_count = len(carousel_media) if isinstance(carousel_media, list) else 0
+            sidecar = node.get("edge_sidecar_to_children")
+            edges = sidecar.get("edges") if isinstance(sidecar, dict) else None
+            if isinstance(edges, list):
+                carousel_count = max(carousel_count, len(edges))
+            serialized = json.dumps(node, ensure_ascii=False)
+            parsed = cls._parse_instagram_html(serialized)
+            image_count = cls._instagram_slide_count(parsed["image_urls"])
+            return carousel_count, image_count
+
+        best = max(target_nodes, key=completeness)
+        return json.dumps(best, ensure_ascii=False)
+
     def _fetch_instagram_media_info(self, url: str) -> Optional[dict]:
         """
         Запрашивает Instagram-пост и собирает список изображений (для поддержки
@@ -571,6 +709,8 @@ class VideoDownloader:
             candidates.append(kk)
 
         trusted_image_urls: list[str] = []
+        target_main_image_urls: list[str] = []
+        mirror_image_urls: list[str] = []
         fallback_image_urls: list[str] = []
         video_url: Optional[str] = None
         has_video_marker = False
@@ -582,18 +722,31 @@ class VideoDownloader:
             if not html:
                 continue
 
-            parsed = self._parse_instagram_html(html)
             candidate_path = (urlparse(candidate).path or "").lower()
             is_target_embed = is_instagram_url(candidate) and "/embed" in candidate_path
-            image_urls = trusted_image_urls if is_target_embed else fallback_image_urls
+            target_payload = (
+                self._extract_instagram_target_payload(html, shortcode)
+                if is_instagram_url(candidate) and not is_target_embed
+                else None
+            )
+            is_target_main = target_payload is not None
+            parsed = self._parse_instagram_html(target_payload or html)
+            if is_target_embed:
+                image_urls = trusted_image_urls
+            elif is_target_main:
+                image_urls = target_main_image_urls
+            elif is_kkinstagram_url(candidate):
+                image_urls = mirror_image_urls
+            else:
+                image_urls = fallback_image_urls
             for img in parsed["image_urls"]:
                 if img not in image_urls:
                     image_urls.append(img)
             if parsed["video_url"] and not video_url:
                 video_url = parsed["video_url"]
-            if parsed.get("has_video_marker") and is_target_embed:
+            if parsed.get("has_video_marker") and (is_target_embed or is_target_main):
                 has_video_marker = True
-            if parsed.get("media_kind") == "photo" and is_target_embed:
+            if parsed.get("media_kind") == "photo" and (is_target_embed or is_target_main):
                 has_photo_marker = True
             if parsed["title"] and not title:
                 title = parsed["title"]
@@ -604,16 +757,27 @@ class VideoDownloader:
             # только первый слайд, другой — полную карусель.
             if has_video_marker:
                 break
-            active_images = trusted_image_urls or fallback_image_urls
-            if has_photo_marker and len(active_images) >= MAX_CAROUSEL_ITEMS:
+            active_images = max(
+                (trusted_image_urls, target_main_image_urls, mirror_image_urls),
+                key=lambda urls: (self._instagram_slide_count(urls), len(urls)),
+            )
+            active_slide_count = self._instagram_slide_count(active_images)
+            if has_photo_marker and active_slide_count >= MAX_CAROUSEL_ITEMS:
                 break
 
-        image_urls = trusted_image_urls or fallback_image_urls
+        # Embed and the target-only mirror are safe carousel sources. Prefer the
+        # more complete one; use the main page only if neither yielded media,
+        # because its JSON can include recommendation thumbnails.
+        trusted_sources = max(
+            (trusted_image_urls, target_main_image_urls, mirror_image_urls),
+            key=lambda urls: (self._instagram_slide_count(urls), len(urls)),
+        )
+        image_urls = trusted_sources or fallback_image_urls
         if not image_urls and not video_url:
             return None
 
         return {
-            "image_urls": image_urls[:MAX_CAROUSEL_ITEMS],
+            "image_urls": self._limit_instagram_image_variants(image_urls),
             "video_url": video_url,
             "has_video": has_video_marker,
             "media_kind": (
@@ -633,31 +797,60 @@ class VideoDownloader:
         candidate: str,
         cookie_jar: Optional[http.cookiejar.CookieJar] = None,
     ) -> Optional[str]:
-        try:
-            req = urllib.request.Request(
-                candidate,
-                headers={
-                    "User-Agent": BROWSER_USER_AGENT,
-                    "Accept": (
-                        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
-                    ),
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-            )
-            if cookie_jar is not None:
-                opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-                ctx = opener.open(req, timeout=15)
-            else:
-                ctx = urllib.request.urlopen(req, timeout=15)
-            with ctx as resp:
-                content_type = (resp.headers.get("Content-Type") or "").lower()
-                if "html" not in content_type:
-                    return None
-                raw = resp.read(4 * 1024 * 1024)
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            logger.debug("HTML fetch failed for %s: %s", candidate, e)
-            return None
-        return raw.decode("utf-8", errors="ignore")
+        for retry_index in range(3):
+            try:
+                req = urllib.request.Request(
+                    candidate,
+                    headers={
+                        "User-Agent": BROWSER_USER_AGENT,
+                        "Accept": (
+                            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                            "image/webp,*/*;q=0.8"
+                        ),
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                if cookie_jar is not None:
+                    opener = urllib.request.build_opener(
+                        urllib.request.HTTPCookieProcessor(cookie_jar)
+                    )
+                    ctx = opener.open(req, timeout=15)
+                else:
+                    ctx = urllib.request.urlopen(req, timeout=15)
+                with ctx as resp:
+                    content_type = (resp.headers.get("Content-Type") or "").lower()
+                    if "html" not in content_type:
+                        return None
+                    raw = resp.read(4 * 1024 * 1024)
+                return raw.decode("utf-8", errors="ignore")
+            except urllib.error.HTTPError as exc:
+                is_transient = exc.code in {408, 425, 429} or 500 <= exc.code < 600
+                if is_transient and retry_index < 2:
+                    delay = _download_retry_delay(retry_index)
+                    logger.warning(
+                        "Временная HTTP %s при HTML probe, повтор через %ss: %s",
+                        exc.code,
+                        delay,
+                        candidate,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.debug("HTML fetch failed for %s: %s", candidate, exc)
+                return None
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if retry_index < 2:
+                    delay = _download_retry_delay(retry_index)
+                    logger.warning(
+                        "Временная ошибка HTML probe, повтор через %ss: %s (%s)",
+                        delay,
+                        candidate,
+                        exc,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.debug("HTML fetch failed for %s: %s", candidate, exc)
+                return None
+        return None
 
     @classmethod
     def _parse_instagram_html(cls, html: str) -> dict:
@@ -913,73 +1106,110 @@ class VideoDownloader:
         Скачивает картинку по прямой ссылке и сохраняет её рядом с output_base,
         выбирая расширение по Content-Type или URL. Возвращает путь к файлу или None.
         """
-        try:
-            req = urllib.request.Request(
-                image_url,
-                headers={
-                    "User-Agent": TELEGRAM_BOT_USER_AGENT,
-                    "Referer": "https://www.instagram.com/",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                content_type = (resp.headers.get("Content-Type") or "").lower()
-                if not content_type.startswith("image/"):
-                    logger.warning(
-                        "Отбрасываю фото %s: Content-Type %r не является image/*",
-                        image_url,
-                        content_type,
-                    )
-                    return None
-                if "jpeg" in content_type or "jpg" in content_type:
-                    ext = "jpg"
-                elif "png" in content_type:
-                    ext = "png"
-                elif "webp" in content_type:
-                    ext = "webp"
-                elif "heic" in content_type:
-                    ext = "heic"
-                else:
-                    path = urlparse(image_url).path
-                    ext = os.path.splitext(path)[1].lstrip(".").lower() or "jpg"
-                    if len(ext) > 5 or not ext.isalnum():
+        for retry_index in range(3):
+            output_path: Optional[str] = None
+            try:
+                req = urllib.request.Request(
+                    image_url,
+                    headers={
+                        "User-Agent": TELEGRAM_BOT_USER_AGENT,
+                        "Referer": "https://www.instagram.com/",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    content_type = (resp.headers.get("Content-Type") or "").lower()
+                    if not content_type.startswith("image/"):
+                        logger.warning(
+                            "Отбрасываю фото %s: Content-Type %r не является image/*",
+                            image_url,
+                            content_type,
+                        )
+                        return None
+                    if "jpeg" in content_type or "jpg" in content_type:
                         ext = "jpg"
+                    elif "png" in content_type:
+                        ext = "png"
+                    elif "webp" in content_type:
+                        ext = "webp"
+                    elif "heic" in content_type:
+                        ext = "heic"
+                    else:
+                        path = urlparse(image_url).path
+                        ext = os.path.splitext(path)[1].lstrip(".").lower() or "jpg"
+                        if len(ext) > 5 or not ext.isalnum():
+                            ext = "jpg"
 
-                output_path = f"{output_base}.{ext}"
-                total = 0
-                with open(output_path, "wb") as f:
-                    while True:
-                        chunk = resp.read(64 * 1024)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if total > MAX_FILE_SIZE:
-                            f.close()
-                            try:
-                                os.remove(output_path)
-                            except OSError:
-                                pass
-                            logger.warning(
-                                "Image exceeds MAX_FILE_SIZE (%s bytes), aborted: %s",
-                                total,
-                                image_url,
-                            )
-                            return None
-                        f.write(chunk)
-                if total < 1024:
+                    output_path = f"{output_base}.{ext}"
+                    total = 0
+                    with open(output_path, "wb") as file:
+                        while True:
+                            chunk = resp.read(64 * 1024)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > MAX_FILE_SIZE:
+                                file.close()
+                                try:
+                                    os.remove(output_path)
+                                except OSError:
+                                    pass
+                                logger.warning(
+                                    "Image exceeds MAX_FILE_SIZE (%s bytes), aborted: %s",
+                                    total,
+                                    image_url,
+                                )
+                                return None
+                            file.write(chunk)
+                    if total < 1024:
+                        try:
+                            os.remove(output_path)
+                        except OSError:
+                            pass
+                        logger.warning(
+                            "Отбрасываю фото %s: слишком маленький файл (%s байт)",
+                            image_url,
+                            total,
+                        )
+                        return None
+                    return output_path
+            except urllib.error.HTTPError as exc:
+                if output_path:
                     try:
                         os.remove(output_path)
                     except OSError:
                         pass
+                is_transient = exc.code in {408, 425, 429} or 500 <= exc.code < 600
+                if is_transient and retry_index < 2:
+                    delay = _download_retry_delay(retry_index)
                     logger.warning(
-                        "Отбрасываю фото %s: слишком маленький файл (%s байт)",
+                        "Временная HTTP %s при загрузке фото, повтор через %ss: %s",
+                        exc.code,
+                        delay,
                         image_url,
-                        total,
                     )
-                    return None
-                return output_path
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            logger.warning("Не удалось скачать фото %s: %s", image_url, e)
-            return None
+                    time.sleep(delay)
+                    continue
+                logger.warning("Не удалось скачать фото %s: %s", image_url, exc)
+                return None
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if output_path:
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+                if retry_index < 2:
+                    delay = _download_retry_delay(retry_index)
+                    logger.warning(
+                        "Временная ошибка загрузки фото, повтор через %ss (%s): %s",
+                        delay,
+                        exc,
+                        image_url,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.warning("Не удалось скачать фото %s: %s", image_url, exc)
+                return None
+        return None
 
     @staticmethod
     def _video_metadata(
@@ -1191,6 +1421,7 @@ class VideoDownloader:
         loop = asyncio.get_event_loop()
 
         photo_fallback: Optional[DownloadResult] = None
+        photo_fallback_confirmed = False
         if is_instagram_photo_candidate_url(url):
             photo_result = await loop.run_in_executor(None, lambda: self._try_instagram_photo(url))
             if photo_result is not None:
@@ -1201,9 +1432,16 @@ class VideoDownloader:
                 # A marker from a target-specific embed is safe to return now;
                 # this preserves photo carousels that yt-dlp intentionally omits.
                 if photo_result.media_type_confirmed:
-                    if allow_carousel:
-                        self.add_to_cache(url, photo_result)
-                    return photo_result
+                    # A yt-dlp probe can reveal a carousel when the public embed
+                    # exposed only its first slide. Keep the scoped photo as a
+                    # safe fallback if that probe fails (cookies help but aren't
+                    # required for the attempt).
+                    should_probe_playlist = not photo_result.carousel_slides
+                    if not should_probe_playlist:
+                        if allow_carousel:
+                            self.add_to_cache(url, photo_result)
+                        return photo_result
+                    photo_fallback_confirmed = True
                 photo_fallback = photo_result
 
         # X/Twitter: если в твите есть фото, собираем полную карусель через
@@ -1218,7 +1456,9 @@ class VideoDownloader:
                 return twitter_result
 
         file_id = str(uuid.uuid4())[:8]
-        output_path = str(self.download_dir / f"{file_id}.%(ext)s")
+        # ``%(id)s`` prevents playlist/carousel entries with the same extension
+        # from overwriting one another (e.g. every Instagram slide as uuid.jpg).
+        output_path = str(self.download_dir / f"{file_id}_%(id)s.%(ext)s")
         ydl_opts = self._get_ydl_opts(output_path, url)
 
         try:
@@ -1227,9 +1467,35 @@ class VideoDownloader:
             # Instagram currently omits duration for many real videos, so duration
             # must never be used as a media-type detector.
             if result.success:
+                if photo_fallback is not None and result.is_photo:
+                    fallback_count = len(
+                        photo_fallback.carousel_slides
+                        or photo_fallback.photo_paths
+                        or [photo_fallback.file_path]
+                    )
+                    result_count = len(
+                        result.carousel_slides or result.photo_paths or [result.file_path]
+                    )
+                    if fallback_count > result_count:
+                        # yt-dlp confirmed that the post is photographic but
+                        # exposed fewer slides than the scoped HTML scrape.
+                        self.discard_result_files(result)
+                        richer_photo = photo_fallback
+                        photo_fallback = None
+                        richer_photo.media_type_confirmed = True
+                        if allow_carousel:
+                            self.add_to_cache(url, richer_photo)
+                        return richer_photo
                 if allow_carousel:
                     self.add_to_cache(url, result)
                 return result
+
+            if photo_fallback is not None and photo_fallback_confirmed:
+                confirmed_photo = photo_fallback
+                photo_fallback = None
+                if allow_carousel:
+                    self.add_to_cache(url, confirmed_photo)
+                return confirmed_photo
 
             # Only yt-dlp's explicit "there is no video in this post" result
             # confirms that an otherwise ambiguous HTML image is the real media.
@@ -1268,8 +1534,8 @@ class VideoDownloader:
 
     def _try_instagram_photo(self, url: str) -> Optional[DownloadResult]:
         """
-        Если Instagram-пост без видео (фото или карусель фото), скачивает первые
-        10 фото и возвращает DownloadResult(is_photo=True, photo_paths=[...]).
+        Если Instagram-пост без видео (фото или карусель фото), скачивает до
+        20 фото и возвращает DownloadResult(is_photo=True, photo_paths=[...]).
         Возвращает None, если фото не обнаружено — тогда вызывающий код падает в
         обычный video-flow через yt-dlp.
         """
@@ -1301,8 +1567,7 @@ class VideoDownloader:
         groups: list[list[str]] = []
         groups_by_key: dict[str, list[str]] = {}
         for u in cdn_images:
-            parsed = urlparse(u)
-            key = f"{parsed.hostname}{parsed.path}"
+            key = self._instagram_image_key(u)
             variants = groups_by_key.get(key)
             if variants is None:
                 variants = [u]
@@ -1317,15 +1582,23 @@ class VideoDownloader:
         for idx, variants in enumerate(groups):
             variants.sort(key=self._is_resized_variant)
             output_base = str(self.download_dir / f"{batch_id}_{idx}")
+            downloaded_path: Optional[str] = None
             for variant_url in variants:
                 path = self._download_image_sync(variant_url, output_base)
                 if path:
-                    downloaded.append(path)
+                    downloaded_path = path
+                    downloaded.append(downloaded_path)
                     # Запоминаем URL варианта, который реально скачался: его же
                     # отдадим Telegram в rich-карусели — раз скачали мы, скорее
                     # всего скачает и он (тот же подписанный CDN-URL).
                     slide_urls.append(variant_url)
                     break
+
+            if downloaded_path is None:
+                # Returning a silently truncated carousel is worse than a clean
+                # failure: let yt-dlp/other fallbacks try to recover all slides.
+                self._delete_entry_files({"photo_paths": downloaded})
+                return None
 
         if not downloaded:
             return None
@@ -1360,15 +1633,30 @@ class VideoDownloader:
         if "/status/" not in path:
             return None
         api_url = f"https://api.fxtwitter.com{path}"
-        try:
-            req = urllib.request.Request(
-                api_url,
-                headers={"User-Agent": BROWSER_USER_AGENT, "Accept": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = resp.read(4 * 1024 * 1024)
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            logger.debug("fxtwitter fetch failed for %s: %s", api_url, e)
+        raw: Optional[bytes] = None
+        for retry_index in range(3):
+            try:
+                req = urllib.request.Request(
+                    api_url,
+                    headers={"User-Agent": BROWSER_USER_AGENT, "Accept": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    raw = resp.read(4 * 1024 * 1024)
+                break
+            except urllib.error.HTTPError as exc:
+                is_transient = exc.code in {408, 425, 429} or 500 <= exc.code < 600
+                if is_transient and retry_index < 2:
+                    time.sleep(_download_retry_delay(retry_index))
+                    continue
+                logger.debug("fxtwitter fetch failed for %s: %s", api_url, exc)
+                return None
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if retry_index < 2:
+                    time.sleep(_download_retry_delay(retry_index))
+                    continue
+                logger.debug("fxtwitter fetch failed for %s: %s", api_url, exc)
+                return None
+        if raw is None:
             return None
         try:
             data = json.loads(raw.decode("utf-8", errors="ignore"))
@@ -1438,8 +1726,15 @@ class VideoDownloader:
     def _download_sync(self, url: str, ydl_opts: dict) -> DownloadResult:
         """Синхронная функция скачивания для запуска в executor."""
 
+        attempt_downloads: list[list[str]] = []
+
+        def cleanup_failed_attempts() -> None:
+            for paths in attempt_downloads:
+                self._delete_entry_files({"photo_paths": paths})
+
         def attempt_download(download_url: str, opts: dict) -> DownloadResult:
             all_downloaded: list[str] = []
+            attempt_downloads.append(all_downloaded)
 
             def progress_hook(d):
                 if d.get("status") == "finished":
@@ -1518,13 +1813,17 @@ class VideoDownloader:
                     f for f in existing if os.path.splitext(f)[1].lower() in _IMAGE_EXTENSIONS
                 ]
                 if len(image_files) > 1:
+                    kept_images = image_files[:MAX_CAROUSEL_ITEMS]
+                    self._delete_entry_files(
+                        {"photo_paths": [path for path in existing if path not in kept_images]}
+                    )
                     return DownloadResult(
                         success=True,
-                        file_path=image_files[0],
+                        file_path=kept_images[0],
                         title=title,
                         duration=duration,
                         is_photo=True,
-                        photo_paths=image_files[:MAX_CAROUSEL_ITEMS],
+                        photo_paths=kept_images,
                         carousel_slides=carousel_slides,
                     )
 
@@ -1555,6 +1854,16 @@ class VideoDownloader:
                     and isinstance(downloaded_file_path, str)
                     and os.path.exists(downloaded_file_path)
                 ):
+                    # A playlist may have produced several files even when the
+                    # result below exposes only one.  Remove every unowned file
+                    # now so mixed/video playlists cannot leak on disk.
+                    self._delete_entry_files(
+                        {
+                            "photo_paths": [
+                                path for path in existing if path != downloaded_file_path
+                            ]
+                        }
+                    )
                     actual_size = os.path.getsize(downloaded_file_path)
                     if actual_size > MAX_FILE_SIZE:
                         os.remove(downloaded_file_path)
@@ -1595,7 +1904,9 @@ class VideoDownloader:
                     if isinstance(outtmpl, dict):
                         outtmpl = outtmpl.get("default", "")
                     if isinstance(outtmpl, str) and outtmpl:
-                        file_id = os.path.basename(outtmpl).split(".")[0]
+                        # Keep only the stable prefix before yt-dlp template
+                        # fields, so _find_downloaded_file can scan real names.
+                        file_id = os.path.basename(outtmpl).split("%", 1)[0].rstrip("._-")
                     else:
                         file_id = None
 
@@ -1626,10 +1937,55 @@ class VideoDownloader:
                         error_code="downloader.error.file_not_downloaded",
                     )
 
+        def run_attempt(download_url: str, opts: dict) -> DownloadResult:
+            """Run one yt-dlp attempt and atomically own/clean its output files."""
+
+            first_attempt_list = len(attempt_downloads)
+            outtmpl = opts.get("outtmpl", "")
+            if isinstance(outtmpl, dict):
+                outtmpl = outtmpl.get("default", "")
+            prefix = (
+                os.path.basename(outtmpl).split("%", 1)[0].rstrip("._-")
+                if isinstance(outtmpl, str) and outtmpl
+                else None
+            )
+
+            def produced_paths() -> list[str]:
+                paths: list[str] = []
+                for tracked in attempt_downloads[first_attempt_list:]:
+                    for path in tracked:
+                        if path not in paths:
+                            paths.append(path)
+                if prefix:
+                    for path in self.download_dir.iterdir():
+                        if path.is_file() and path.name.startswith(prefix):
+                            value = str(path)
+                            if value not in paths:
+                                paths.append(value)
+                return paths
+
+            try:
+                result = attempt_download(download_url, opts)
+            except Exception:
+                self._delete_entry_files({"photo_paths": produced_paths()})
+                raise
+
+            keep: set[str] = set()
+            if result.success:
+                if isinstance(result.file_path, str):
+                    keep.add(result.file_path)
+                if isinstance(result.photo_paths, list):
+                    keep.update(path for path in result.photo_paths if isinstance(path, str))
+            self._delete_entry_files(
+                {"photo_paths": [path for path in produced_paths() if path not in keep]}
+            )
+            return result
+
         try:
-            return attempt_download(url, ydl_opts)
+            return run_attempt(url, ydl_opts)
 
         except DownloadError as e:
+            cleanup_failed_attempts()
             error_msg = str(e)
             error_msg_lower = error_msg.lower()
 
@@ -1645,8 +2001,9 @@ class VideoDownloader:
                 ydl_opts_no_cookies = ydl_opts.copy()
                 ydl_opts_no_cookies.pop("cookiefile", None)
                 try:
-                    return attempt_download(url, ydl_opts_no_cookies)
+                    return run_attempt(url, ydl_opts_no_cookies)
                 except DownloadError as e2:
+                    cleanup_failed_attempts()
                     e = e2
                     error_msg = str(e2)
                     error_msg_lower = error_msg.lower()
@@ -1668,8 +2025,9 @@ class VideoDownloader:
                         "User-Agent": TELEGRAM_BOT_USER_AGENT,
                     }
                     try:
-                        return attempt_download(kk_url, ydl_opts_kk)
+                        return run_attempt(kk_url, ydl_opts_kk)
                     except DownloadError as e2:
+                        cleanup_failed_attempts()
                         logger.warning("Fallback через kkinstagram не сработал: %s", e2)
                         e = e2
                         error_msg = str(e2)
@@ -1720,6 +2078,7 @@ class VideoDownloader:
                     error_args={"message": truncated},
                 )
         except Exception as e:
+            cleanup_failed_attempts()
             truncated = str(e)[:200]
             return DownloadResult(
                 success=False,

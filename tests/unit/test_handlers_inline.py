@@ -6,7 +6,7 @@ import pytest
 from aiogram.exceptions import TelegramServerError
 
 from src.bot.handlers import inline as inline_h
-from src.services.downloader import DownloadResult
+from src.services.downloader import CarouselSlide, DownloadResult
 from src.services.i18n import Translator
 
 from ._helpers import make_bot, make_callback, make_db
@@ -92,6 +92,22 @@ async def test_inline_query_url_cached_photo():
             with patch.object(inline_h.downloader, "get_telegram_mp3_file_id", return_value=None):
                 await inline_h.inline_query_handler(q, make_db(), Translator("en"))
     q.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inline_query_cached_carousel_is_not_flattened_to_cached_photo():
+    q = make_inline_query("https://www.instagram.com/p/ABC/")
+    slides = [CarouselSlide("https://cdn/1.jpg"), CarouselSlide("https://cdn/2.jpg")]
+    with (
+        patch.object(inline_h.downloader, "get_cached_carousel_slides", return_value=slides),
+        patch.object(inline_h.downloader, "get_cached_media_type", return_value="photo"),
+        patch.object(inline_h.downloader, "get_telegram_photo_file_id", return_value="first"),
+        patch.object(inline_h.downloader, "get_telegram_mp3_file_id", return_value=None),
+    ):
+        await inline_h.inline_query_handler(q, make_db(), Translator("en"))
+
+    first_result = q.answer.await_args.kwargs["results"][0]
+    assert first_result.id.startswith("download:")
 
 
 @pytest.mark.asyncio
@@ -433,6 +449,95 @@ async def test_chosen_inline_download_photo_success(tmp_path):
         with patch.object(inline_h, "_upload_photo_and_get_file_id", AsyncMock(return_value="pf")):
             await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
     bot.edit_message_media.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chosen_inline_photo_carousel_edits_rich_message_with_file_ids(tmp_path):
+    url = "https://www.instagram.com/p/CAROUSEL/"
+    cr = make_chosen_result("download:abc", url)
+    bot = make_bot()
+    bot.edit_message_text.side_effect = [
+        TelegramServerError(method=MagicMock(), message="Gateway Timeout (504)"),
+        None,
+    ]
+    db = make_db()
+    paths = [tmp_path / "1.jpg", tmp_path / "2.jpg"]
+    for path in paths:
+        path.write_bytes(b"x")
+    result = DownloadResult(
+        success=True,
+        file_path=str(paths[0]),
+        title="Two photos",
+        is_photo=True,
+        photo_paths=[str(path) for path in paths],
+        carousel_slides=[
+            CarouselSlide("https://cdn/1.jpg"),
+            CarouselSlide("https://cdn/2.jpg"),
+        ],
+    )
+    upload_carousel = AsyncMock(return_value=["photo_file_1", "photo_file_2"])
+    download = AsyncMock(return_value=result)
+    with (
+        patch.object(inline_h.downloader, "get_from_cache", return_value=None),
+        patch.object(inline_h.downloader, "download", download),
+        patch.object(inline_h, "_upload_carousel_photos_and_get_file_ids", upload_carousel),
+        patch("src.bot.telegram_retry.asyncio.sleep", AsyncMock()) as sleep,
+    ):
+        await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
+
+    download.assert_awaited_once_with(url, allow_carousel=False)
+    upload_carousel.assert_awaited_once_with(bot, [str(path) for path in paths])
+    assert bot.edit_message_text.await_count == 2
+    sleep.assert_awaited_once_with(1.0)
+    rich_message = bot.edit_message_text.await_args.kwargs["rich_message"]
+    assert rich_message.media is not None
+    assert [item.media.media for item in rich_message.media] == [
+        "photo_file_1",
+        "photo_file_2",
+    ]
+    bot.edit_message_media.assert_not_awaited()
+    assert db.record_download.await_args.kwargs["success"] is True
+    assert all(not path.exists() for path in paths)
+
+
+@pytest.mark.asyncio
+async def test_chosen_inline_photo_carousel_rich_failure_falls_back_to_first_photo(tmp_path):
+    url = "https://www.instagram.com/p/CAROUSEL/"
+    cr = make_chosen_result("download:abc", url)
+    bot = make_bot()
+    bot.edit_message_text.side_effect = RuntimeError("rich edit rejected")
+    db = make_db()
+    paths = [tmp_path / "1.jpg", tmp_path / "2.jpg"]
+    for path in paths:
+        path.write_bytes(b"x")
+    result = DownloadResult(
+        success=True,
+        file_path=str(paths[0]),
+        is_photo=True,
+        photo_paths=[str(path) for path in paths],
+        carousel_slides=[
+            CarouselSlide("https://cdn/1.jpg"),
+            CarouselSlide("https://cdn/2.jpg"),
+        ],
+    )
+    with (
+        patch.object(inline_h.downloader, "get_from_cache", return_value=None),
+        patch.object(inline_h.downloader, "download", AsyncMock(return_value=result)),
+        patch.object(
+            inline_h,
+            "_upload_carousel_photos_and_get_file_ids",
+            AsyncMock(return_value=["photo_file_1", "photo_file_2"]),
+        ),
+        patch.object(inline_h, "_upload_photo_and_get_file_id", AsyncMock(return_value="first")),
+        patch.object(inline_h.downloader, "set_telegram_photo_file_id") as cache_first,
+    ):
+        await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
+
+    bot.edit_message_text.assert_awaited_once()  # file_id-rich only; URLs are forbidden inline
+    bot.edit_message_media.assert_awaited_once()
+    cache_first.assert_not_called()
+    assert db.record_download.await_args.kwargs["success"] is True
+    assert all(not path.exists() for path in paths)
 
 
 @pytest.mark.asyncio
