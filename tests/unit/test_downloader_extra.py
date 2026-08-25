@@ -289,9 +289,7 @@ def test_http_get_html_url_error():
 
 
 def test_http_get_html_retries_504_then_succeeds():
-    timeout = urllib.error.HTTPError(
-        "https://x", 504, "Gateway Timeout", hdrs=None, fp=None
-    )
+    timeout = urllib.error.HTTPError("https://x", 504, "Gateway Timeout", hdrs=None, fp=None)
     fake = MagicMock()
     fake.headers = {"Content-Type": "text/html"}
     fake.read = MagicMock(return_value=b"<html>ok</html>")
@@ -497,28 +495,31 @@ def test_fetch_instagram_media_info_scopes_main_page_to_shortcode(tmp_path):
         '{"media_type":1,"image_versions2":{"candidates":['
         f'{{"url":"{target_urls[0]}","width":1080,"height":1350}}]}}'
     )
+
     def media(image_url):
         return {
             "media_type": 1,
-            "image_versions2": {
-                "candidates": [{"url": image_url, "width": 1080, "height": 1350}]
-            },
+            "image_versions2": {"candidates": [{"url": image_url, "width": 1080, "height": 1350}]},
         }
 
-    main_html = '<script type="application/json">' + json.dumps(
-        {
-            "items": [
-                {"code": "abc", "media_type": 8, "carousel_media": [media(target_urls[0])]},
-                {
-                    "code": "abc",
-                    "media_type": 8,
-                    "caption": {"text": 'say "hi" {still-json}'},
-                    "carousel_media": [media(image_url) for image_url in target_urls],
-                },
-            ],
-            "recommendations": [{"code": "other", **media("https://unsafe.example/rec.jpg")}],
-        }
-    ).replace("&", r"\u0026") + "</script>"
+    main_html = (
+        '<script type="application/json">'
+        + json.dumps(
+            {
+                "items": [
+                    {"code": "abc", "media_type": 8, "carousel_media": [media(target_urls[0])]},
+                    {
+                        "code": "abc",
+                        "media_type": 8,
+                        "caption": {"text": 'say "hi" {still-json}'},
+                        "carousel_media": [media(image_url) for image_url in target_urls],
+                    },
+                ],
+                "recommendations": [{"code": "other", **media("https://unsafe.example/rec.jpg")}],
+            }
+        ).replace("&", r"\u0026")
+        + "</script>"
+    )
 
     def fake_get(candidate, **_kwargs):
         if "/embed" in candidate:
@@ -917,7 +918,9 @@ async def test_download_probes_single_target_photo_then_keeps_confirmed_fallback
         patch.object(
             d,
             "_download_sync",
-            return_value=DownloadResult(success=False, error_code="downloader.error.download_failed"),
+            return_value=DownloadResult(
+                success=False, error_code="downloader.error.download_failed"
+            ),
         ) as download_sync,
     ):
         result = await d.download("https://www.instagram.com/p/abc/")

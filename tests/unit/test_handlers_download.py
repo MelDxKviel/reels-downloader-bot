@@ -302,9 +302,7 @@ async def test_handle_url_telegram_bad_request_other_reraises(tmp_path):
     db = make_db()
     photo = tmp_path / "p.jpg"
     photo.write_bytes(b"x")
-    msg.bot.send_photo.side_effect = TelegramBadRequest(
-        method=MagicMock(), message="OTHER_ERROR"
-    )
+    msg.bot.send_photo.side_effect = TelegramBadRequest(method=MagicMock(), message="OTHER_ERROR")
 
     result = DownloadResult(
         success=True, file_path=str(photo), is_photo=True, photo_paths=[str(photo)]

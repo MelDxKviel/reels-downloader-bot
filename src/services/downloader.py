@@ -624,9 +624,7 @@ class VideoDownloader:
                     except (ValueError, json.JSONDecodeError):
                         pass
 
-        json_sources = re.findall(
-            r"<script[^>]*>(.*?)</script>", probe, re.IGNORECASE | re.DOTALL
-        )
+        json_sources = re.findall(r"<script[^>]*>(.*?)</script>", probe, re.IGNORECASE | re.DOTALL)
         stripped_probe = probe.strip()
         if stripped_probe[:1] in {"{", "["}:
             json_sources.append(stripped_probe)
@@ -1858,11 +1856,7 @@ class VideoDownloader:
                     # result below exposes only one.  Remove every unowned file
                     # now so mixed/video playlists cannot leak on disk.
                     self._delete_entry_files(
-                        {
-                            "photo_paths": [
-                                path for path in existing if path != downloaded_file_path
-                            ]
-                        }
+                        {"photo_paths": [path for path in existing if path != downloaded_file_path]}
                     )
                     actual_size = os.path.getsize(downloaded_file_path)
                     if actual_size > MAX_FILE_SIZE:
