@@ -31,6 +31,7 @@ from src.services.url_utils import (
     get_platform_name,
     get_url_hash,
     is_instagram_photo_candidate_url,
+    is_instagram_post_url,
     is_instagram_url,
     is_kkinstagram_url,
     is_supported_url,
@@ -42,6 +43,10 @@ from src.services.url_utils import (
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_USER_AGENT = "TelegramBot (like TwitterBot)"
+
+_INSTAGRAM_APP_ID = "936619743392459"
+_INSTAGRAM_ASBD_ID = "198387"
+_INSTAGRAM_SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 _IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".mkv", ".m4v"})
@@ -561,6 +566,213 @@ class VideoDownloader:
             logger.warning("Не удалось загрузить Instagram cookies для HTML-скрапинга: %s", e)
             return None
 
+    @staticmethod
+    def _instagram_shortcode_to_media_id(shortcode: str) -> Optional[str]:
+        """Decode an Instagram shortcode into the numeric product API media ID."""
+
+        if not shortcode:
+            return None
+        # Instagram sometimes appends a 28-character private-post suffix. This
+        # mirrors yt-dlp's decoder while the exact returned ``code`` is still
+        # validated before any API payload is trusted.
+        shortcode = VideoDownloader._instagram_canonical_shortcode(shortcode)
+
+        media_id = 0
+        for character in shortcode:
+            digit = _INSTAGRAM_SHORTCODE_ALPHABET.find(character)
+            if digit < 0:
+                return None
+            media_id = media_id * len(_INSTAGRAM_SHORTCODE_ALPHABET) + digit
+        return str(media_id)
+
+    @staticmethod
+    def _instagram_canonical_shortcode(shortcode: str) -> str:
+        return shortcode[:-28] if len(shortcode) > 28 else shortcode
+
+    def _fetch_instagram_product_info(
+        self,
+        shortcode: str,
+        cookie_jar: http.cookiejar.CookieJar,
+    ) -> Optional[dict]:
+        """Fetch exact authenticated media metadata used by yt-dlp itself."""
+
+        if not any(cookie.name == "sessionid" and cookie.value for cookie in cookie_jar):
+            return None
+        media_id = self._instagram_shortcode_to_media_id(shortcode)
+        if not media_id:
+            return None
+
+        api_url = f"https://i.instagram.com/api/v1/media/{media_id}/info/"
+        for retry_index in range(3):
+            try:
+                request = urllib.request.Request(
+                    api_url,
+                    headers={
+                        "User-Agent": BROWSER_USER_AGENT,
+                        "Accept": "*/*",
+                        "X-IG-App-ID": _INSTAGRAM_APP_ID,
+                        "X-ASBD-ID": _INSTAGRAM_ASBD_ID,
+                        "X-IG-WWW-Claim": "0",
+                        "Origin": "https://www.instagram.com",
+                        "Referer": f"https://www.instagram.com/p/{shortcode}/",
+                    },
+                )
+                opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+                with opener.open(request, timeout=15) as response:
+                    payload = json.loads(response.read(4 * 1024 * 1024).decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                is_transient = exc.code in {408, 425, 429} or 500 <= exc.code < 600
+                if is_transient and retry_index < 2:
+                    delay = _download_retry_delay(retry_index)
+                    logger.warning(
+                        "Временная Instagram API HTTP %s, повтор через %ss",
+                        exc.code,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.debug("Instagram product API failed for %s: %s", shortcode, exc)
+                return None
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if retry_index < 2:
+                    delay = _download_retry_delay(retry_index)
+                    logger.warning(
+                        "Временная ошибка Instagram API, повтор через %ss: %s",
+                        delay,
+                        exc,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.debug("Instagram product API failed for %s: %s", shortcode, exc)
+                return None
+            except (UnicodeDecodeError, ValueError) as exc:
+                logger.debug("Invalid Instagram product API response for %s: %s", shortcode, exc)
+                return None
+
+            items = payload.get("items") if isinstance(payload, dict) else None
+            product = items[0] if isinstance(items, list) and items else None
+            canonical_shortcode = self._instagram_canonical_shortcode(shortcode)
+            if not isinstance(product, dict) or product.get("code") != canonical_shortcode:
+                logger.warning("Instagram product API returned mismatched media for %s", shortcode)
+                return None
+            return product
+        return None
+
+    @staticmethod
+    def _instagram_product_media_kind(product: dict) -> str:
+        """Classify exact product metadata without mistaking a video cover for a photo."""
+
+        def node_kind(node: object) -> str:
+            if not isinstance(node, dict):
+                return "unknown"
+            media_type = str(node.get("media_type") or "")
+            if (
+                media_type == "2"
+                or bool(node.get("video_versions"))
+                or bool(node.get("video_dash_manifest"))
+            ):
+                return "video"
+            if media_type == "1" and isinstance(node.get("image_versions2"), dict):
+                return "photo"
+            return "unknown"
+
+        root_media_type = str(product.get("media_type") or "")
+        if root_media_type != "8":
+            return node_kind(product)
+
+        children = product.get("carousel_media")
+        if not isinstance(children, list) or not children:
+            return "unknown"
+        child_kinds = [node_kind(child) for child in children]
+        if "video" in child_kinds:
+            return "video"
+        if all(kind == "photo" for kind in child_kinds):
+            return "photo"
+        return "unknown"
+
+    @classmethod
+    def _instagram_product_media_urls(cls, product: dict) -> tuple[list[str], Optional[str]]:
+        """Extract ordered full-size image URLs and the first video URL from product JSON."""
+
+        children = product.get("carousel_media")
+        nodes = children if isinstance(children, list) and children else [product]
+        image_urls: list[str] = []
+        video_url: Optional[str] = None
+
+        for node in nodes[:MAX_CAROUSEL_ITEMS]:
+            if not isinstance(node, dict):
+                continue
+            image_versions = node.get("image_versions2")
+            candidates = (
+                image_versions.get("candidates") if isinstance(image_versions, dict) else None
+            )
+            ranked_images: list[tuple[int, str]] = []
+            for candidate in candidates if isinstance(candidates, list) else []:
+                if not isinstance(candidate, dict):
+                    continue
+                image_url = candidate.get("url")
+                if not isinstance(image_url, str):
+                    continue
+                if os.path.splitext(urlparse(image_url).path)[1].lower() not in _IMAGE_EXTENSIONS:
+                    continue
+                try:
+                    area = int(candidate.get("width") or 0) * int(candidate.get("height") or 0)
+                except (TypeError, ValueError):
+                    area = 0
+                ranked_images.append((area, image_url))
+            if ranked_images:
+                # Exactly one selected image per product child. Do not dedupe:
+                # repeated carousel slides are still distinct ordered items.
+                image_urls.append(max(ranked_images, key=lambda item: item[0])[1])
+
+            if video_url is None:
+                versions = node.get("video_versions")
+                ranked_videos: list[tuple[int, str]] = []
+                for version in versions if isinstance(versions, list) else []:
+                    if not isinstance(version, dict) or not isinstance(version.get("url"), str):
+                        continue
+                    try:
+                        area = int(version.get("width") or 0) * int(version.get("height") or 0)
+                    except (TypeError, ValueError):
+                        area = 0
+                    ranked_videos.append((area, version["url"]))
+                if ranked_videos:
+                    video_url = max(ranked_videos, key=lambda item: item[0])[1]
+
+        return image_urls, video_url
+
+    @classmethod
+    def _instagram_product_to_media_info(cls, product: dict) -> Optional[dict]:
+        media_kind = cls._instagram_product_media_kind(product)
+        if media_kind == "unknown":
+            return None
+
+        image_urls, video_url = cls._instagram_product_media_urls(product)
+        if media_kind == "photo":
+            children = product.get("carousel_media")
+            expected_images = (
+                min(len(children), MAX_CAROUSEL_ITEMS)
+                if isinstance(children, list) and children
+                else 1
+            )
+            if len(image_urls) != expected_images:
+                # Never silently flatten/truncate an authenticated carousel.
+                return None
+
+        caption = product.get("caption")
+        caption_text = caption.get("text") if isinstance(caption, dict) else None
+        user = product.get("user")
+        username = user.get("username") if isinstance(user, dict) else None
+        title = caption_text or (f"Post by {username}" if username else None)
+        return {
+            "image_urls": cls._limit_instagram_image_variants(image_urls),
+            "image_urls_are_ordered_slides": True,
+            "video_url": video_url,
+            "has_video": media_kind == "video",
+            "media_kind": media_kind,
+            "title": title,
+        }
+
     def _prepare_ydl_cookie_snapshot(self, ydl_opts: dict) -> tuple[dict, Optional[str]]:
         """Give yt-dlp a private writable copy of a configured cookie jar.
 
@@ -738,6 +950,24 @@ class VideoDownloader:
         """
         shortcode = self._extract_ig_shortcode(url)
         cookie_jar = self._load_instagram_cookie_jar()
+
+        # With session cookies yt-dlp uses this exact product API. Photo entries
+        # intentionally contain no video formats, which newer yt-dlp versions
+        # surface as a generic "No video formats found" error. Inspect the exact
+        # target first so photo carousels (including /reel/ share URLs) are
+        # positively identified before yt-dlp gets a chance to reject them.
+        if shortcode and cookie_jar is not None:
+            product = self._fetch_instagram_product_info(shortcode, cookie_jar)
+            if product is not None:
+                product_media = self._instagram_product_to_media_info(product)
+                if product_media is not None:
+                    return product_media
+
+        # /reel/, /reels/ and /tv/ remain video by default. Only authoritative
+        # product metadata above may prove that such a share URL is photographic;
+        # unscoped HTML/og:image must never turn a failed video into its cover.
+        if not is_instagram_photo_candidate_url(url):
+            return None
 
         candidates: list[str] = []
         if shortcode:
@@ -1553,6 +1783,23 @@ class VideoDownloader:
                 if allow_carousel:
                     self.add_to_cache(url, confirmed_photo)
                 return confirmed_photo
+
+            # Some current Instagram photo posts are shared as /reel/ URLs.
+            # Normal reels must not pay for a duplicate authenticated API call,
+            # so probe this exceptional case only after yt-dlp reports the exact
+            # no-formats failure produced by a photographic product entry.
+            if (
+                result.error_code == "downloader.error.instagram_no_formats"
+                and is_instagram_post_url(url)
+                and not is_instagram_photo_candidate_url(url)
+            ):
+                exact_photo = await loop.run_in_executor(
+                    None, lambda: self._try_instagram_photo(url)
+                )
+                if exact_photo is not None and exact_photo.media_type_confirmed:
+                    if allow_carousel:
+                        self.add_to_cache(url, exact_photo)
+                    return exact_photo
             return result
         except Exception as e:
             msg = str(e)
@@ -1607,16 +1854,22 @@ class VideoDownloader:
         # может оказаться первым — сортировка гарантирует full-size приоритет.
         # Остальные варианты держим как fallback, если подпись oh/oe протухла.
         groups: list[list[str]] = []
-        groups_by_key: dict[str, list[str]] = {}
-        for u in cdn_images:
-            key = self._instagram_image_key(u)
-            variants = groups_by_key.get(key)
-            if variants is None:
-                variants = [u]
-                groups_by_key[key] = variants
-                groups.append(variants)
-            else:
-                variants.append(u)
+        if meta.get("image_urls_are_ordered_slides"):
+            # Product metadata already contributes exactly one largest image
+            # per child. Preserve repeated slides even when their CDN path is
+            # identical; grouping them as signed variants would flatten them.
+            groups = [[image_url] for image_url in cdn_images]
+        else:
+            groups_by_key: dict[str, list[str]] = {}
+            for image_url in cdn_images:
+                key = self._instagram_image_key(image_url)
+                variants = groups_by_key.get(key)
+                if variants is None:
+                    variants = [image_url]
+                    groups_by_key[key] = variants
+                    groups.append(variants)
+                else:
+                    variants.append(image_url)
 
         batch_id = str(uuid.uuid4())[:8]
         downloaded: list[str] = []
@@ -2135,6 +2388,12 @@ class VideoDownloader:
                     success=False,
                     error="Не удалось скачать Instagram фото-пост: требуется авторизация Instagram",
                     error_code="downloader.error.instagram_photo_no_media",
+                )
+            elif "no video formats found" in error_msg_lower and is_instagram_post_url(url):
+                return DownloadResult(
+                    success=False,
+                    error="Instagram не вернул медиаформаты",
+                    error_code="downloader.error.instagram_no_formats",
                 )
             else:
                 truncated = error_msg[:200]

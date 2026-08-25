@@ -337,6 +337,161 @@ def test_http_get_html_success():
 # ── _fetch_instagram_media_info ─────────────────────────────────────────────
 
 
+def test_instagram_shortcode_to_media_id_matches_real_post():
+    assert VideoDownloader._instagram_shortcode_to_media_id("DcHWbs6H5GC") == "3965236657591914882"
+
+
+def test_instagram_shortcode_to_media_id_rejects_invalid_character():
+    assert VideoDownloader._instagram_shortcode_to_media_id("bad.code") is None
+
+
+def test_fetch_instagram_product_info_requires_exact_shortcode(tmp_path):
+    d = make_d(tmp_path)
+    cookie = MagicMock()
+    cookie.name = "sessionid"
+    cookie.value = "dummy-session"
+    response = MagicMock()
+    response.read.return_value = json.dumps(
+        {"items": [{"code": "different", "media_type": 1}]}
+    ).encode()
+    response.__enter__.return_value = response
+    response.__exit__.return_value = False
+    opener = MagicMock()
+    opener.open.return_value = response
+
+    with patch("src.services.downloader.urllib.request.build_opener", return_value=opener):
+        result = d._fetch_instagram_product_info("DcHWbs6H5GC", [cookie])
+
+    assert result is None
+
+
+def test_fetch_instagram_product_info_returns_exact_product(tmp_path):
+    d = make_d(tmp_path)
+    cookie = MagicMock()
+    cookie.name = "sessionid"
+    cookie.value = "dummy-session"
+    product = {"code": "DcHWbs6H5GC", "media_type": 1}
+    response = MagicMock()
+    response.read.return_value = json.dumps({"items": [product]}).encode()
+    response.__enter__.return_value = response
+    response.__exit__.return_value = False
+    opener = MagicMock()
+    opener.open.return_value = response
+
+    with patch("src.services.downloader.urllib.request.build_opener", return_value=opener):
+        result = d._fetch_instagram_product_info("DcHWbs6H5GC", [cookie])
+
+    assert result == product
+    request = opener.open.call_args.args[0]
+    assert "3965236657591914882" in request.full_url
+    assert request.get_header("X-ig-app-id") == "936619743392459"
+
+
+def test_fetch_instagram_product_info_accepts_canonical_private_shortcode(tmp_path):
+    d = make_d(tmp_path)
+    cookie = MagicMock()
+    cookie.name = "sessionid"
+    cookie.value = "dummy-session"
+    canonical = "DcHWbs6H5GC"
+    private_shortcode = canonical + ("A" * 28)
+    product = {"code": canonical, "media_type": 1}
+    response = MagicMock()
+    response.read.return_value = json.dumps({"items": [product]}).encode()
+    response.__enter__.return_value = response
+    response.__exit__.return_value = False
+    opener = MagicMock()
+    opener.open.return_value = response
+
+    with patch("src.services.downloader.urllib.request.build_opener", return_value=opener):
+        result = d._fetch_instagram_product_info(private_shortcode, [cookie])
+
+    assert result == product
+    assert "3965236657591914882" in opener.open.call_args.args[0].full_url
+
+
+def test_instagram_product_photo_carousel_is_exact_and_ordered():
+    first_small = "https://scontent.cdninstagram.com/v/t51/first-small.webp"
+    first_large = "https://scontent.cdninstagram.com/v/t51/first-large.webp"
+    second = "https://scontent.cdninstagram.com/v/t51/second.webp"
+    product = {
+        "code": "DcHWbs6H5GC",
+        "media_type": 8,
+        "caption": {"text": "Carousel caption"},
+        "carousel_media": [
+            {
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [
+                        {"url": first_small, "width": 320, "height": 568},
+                        {"url": first_large, "width": 1080, "height": 1920},
+                    ]
+                },
+            },
+            {
+                "media_type": 1,
+                "image_versions2": {"candidates": [{"url": second, "width": 1080, "height": 1350}]},
+            },
+        ],
+    }
+
+    result = VideoDownloader._instagram_product_to_media_info(product)
+
+    assert result is not None
+    assert result["media_kind"] == "photo"
+    assert result["has_video"] is False
+    assert result["image_urls"] == [first_large, second]
+    assert result["title"] == "Carousel caption"
+
+
+def test_instagram_product_photo_carousel_rejects_missing_child_image():
+    product = {
+        "code": "incomplete",
+        "media_type": 8,
+        "carousel_media": [
+            {
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [
+                        {
+                            "url": "https://scontent.cdninstagram.com/v/t51/first.webp",
+                            "width": 1080,
+                            "height": 1350,
+                        }
+                    ]
+                },
+            },
+            {"media_type": 1, "image_versions2": {"candidates": []}},
+        ],
+    }
+
+    assert VideoDownloader._instagram_product_to_media_info(product) is None
+
+
+def test_instagram_product_mixed_carousel_is_video_not_photo():
+    cover = "https://scontent.cdninstagram.com/v/t51/cover.webp"
+    product = {
+        "code": "mixed",
+        "media_type": 8,
+        "carousel_media": [
+            {
+                "media_type": 1,
+                "image_versions2": {"candidates": [{"url": cover, "width": 1080, "height": 1350}]},
+            },
+            {
+                "media_type": 2,
+                "image_versions2": {"candidates": [{"url": cover, "width": 1080, "height": 1920}]},
+                "video_versions": [{"url": "https://cdn.example/video.mp4"}],
+            },
+        ],
+    }
+
+    result = VideoDownloader._instagram_product_to_media_info(product)
+
+    assert result is not None
+    assert result["media_kind"] == "video"
+    assert result["has_video"] is True
+
+
 def test_fetch_instagram_media_info_no_html(tmp_path):
     d = make_d(tmp_path)
     with patch.object(d, "_http_get_html", return_value=None):
@@ -923,6 +1078,154 @@ def test_try_instagram_photo_groups_variants(tmp_path):
 
 
 # ── download(): photo flow integration ───────────────────────────────────────
+
+
+def test_try_instagram_photo_preserves_authoritative_repeated_slides(tmp_path):
+    d = make_d(tmp_path)
+    base = "https://scontent.cdninstagram.com/v/t51/repeated.webp"
+    urls = [f"{base}?signature=one", f"{base}?signature=two"]
+    first = fake_file(tmp_path, "repeat-one.webp")
+    second = fake_file(tmp_path, "repeat-two.webp")
+    meta = {
+        "image_urls": urls,
+        "image_urls_are_ordered_slides": True,
+        "has_video": False,
+        "media_kind": "photo",
+    }
+
+    with (
+        patch.object(d, "_fetch_instagram_media_info", return_value=meta),
+        patch.object(
+            d,
+            "_download_image_sync",
+            side_effect=[str(first), str(second)],
+        ) as download_image,
+    ):
+        result = d._try_instagram_photo("https://www.instagram.com/p/repeated/")
+
+    assert result is not None
+    assert result.photo_paths == [str(first), str(second)]
+    assert [slide.url for slide in result.carousel_slides] == urls
+    assert download_image.call_count == 2
+
+
+def test_try_instagram_photo_reel_product_video_never_downloads_cover(tmp_path):
+    d = make_d(tmp_path)
+    product = {
+        "code": "video",
+        "media_type": 2,
+        "image_versions2": {
+            "candidates": [
+                {
+                    "url": "https://scontent.cdninstagram.com/v/t51/square-cover.webp",
+                    "width": 1080,
+                    "height": 1080,
+                }
+            ]
+        },
+        "video_versions": [{"url": "https://cdn.example/video.mp4"}],
+    }
+    cookie_jar = MagicMock()
+
+    with (
+        patch.object(d, "_load_instagram_cookie_jar", return_value=cookie_jar),
+        patch.object(d, "_fetch_instagram_product_info", return_value=product),
+        patch.object(d, "_download_image_sync") as download_image,
+    ):
+        result = d._try_instagram_photo("https://www.instagram.com/reel/video/")
+
+    assert result is None
+    download_image.assert_not_called()
+
+
+def test_try_instagram_photo_reel_without_product_does_not_trust_html_cover(tmp_path):
+    d = make_d(tmp_path)
+    cookie_jar = MagicMock()
+
+    with (
+        patch.object(d, "_load_instagram_cookie_jar", return_value=cookie_jar),
+        patch.object(d, "_fetch_instagram_product_info", return_value=None),
+        patch.object(d, "_http_get_html") as get_html,
+    ):
+        result = d._try_instagram_photo("https://www.instagram.com/reel/unknown/")
+
+    assert result is None
+    get_html.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_download_real_reel_photo_carousel_uses_product_metadata(tmp_path):
+    d = make_d(tmp_path)
+    first_url = "https://scontent.cdninstagram.com/v/t51/first.webp"
+    second_url = "https://scontent.cdninstagram.com/v/t51/second.webp"
+    product = {
+        "code": "DcHWbs6H5GC",
+        "media_type": 8,
+        "carousel_media": [
+            {
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [{"url": first_url, "width": 1080, "height": 1920}]
+                },
+            },
+            {
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [{"url": second_url, "width": 1080, "height": 1350}]
+                },
+            },
+        ],
+    }
+    first_path = fake_file(tmp_path, "first.webp")
+    second_path = fake_file(tmp_path, "second.webp")
+
+    with (
+        patch.object(d, "_load_instagram_cookie_jar", return_value=MagicMock()),
+        patch.object(d, "_fetch_instagram_product_info", return_value=product),
+        patch.object(
+            d,
+            "_download_image_sync",
+            side_effect=[str(first_path), str(second_path)],
+        ),
+        patch.object(
+            d,
+            "_download_sync",
+            return_value=DownloadResult(
+                success=False,
+                error_code="downloader.error.instagram_no_formats",
+            ),
+        ) as download_sync,
+    ):
+        result = await d.download("https://www.instagram.com/reel/DcHWbs6H5GC/")
+
+    assert result.success
+    assert result.is_photo
+    assert result.media_type_confirmed
+    assert result.photo_paths == [str(first_path), str(second_path)]
+    assert [slide.url for slide in result.carousel_slides] == [first_url, second_url]
+    assert all(not slide.is_video for slide in result.carousel_slides)
+    download_sync.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_instagram_no_formats_has_structured_error_without_exact_product(tmp_path):
+    from yt_dlp.utils import DownloadError
+
+    d = make_d(tmp_path)
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=None) as photo_probe,
+        patch("src.services.downloader.yt_dlp.YoutubeDL") as ydl_class,
+    ):
+        ydl = MagicMock()
+        ydl_class.return_value.__enter__.return_value = ydl
+        ydl.extract_info.side_effect = DownloadError(
+            "[Instagram] DcHWbs6H5GC: No video formats found!"
+        )
+        result = await d.download("https://www.instagram.com/reel/DcHWbs6H5GC/")
+
+    assert not result.success
+    assert result.error_code == "downloader.error.instagram_no_formats"
+    photo_probe.assert_called_once()
 
 
 @pytest.mark.asyncio
