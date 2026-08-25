@@ -1,6 +1,9 @@
 """Extra downloader tests to push coverage to 100%."""
 
+import concurrent.futures
 import json
+import os
+import threading
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1496,6 +1499,161 @@ async def test_download_cookie_retry_then_fails(tmp_path):
     assert not result.success
     assert "недоступно" in result.error or "Video unavailable" in result.error
     assert call_count == 2
+
+
+def test_download_sync_uses_writable_cookie_snapshot_and_cleans_it(tmp_path):
+    """yt-dlp may rewrite its jar while the configured read-only source stays intact."""
+
+    d = make_d(tmp_path)
+    source = tmp_path / "instagram-cookies.txt"
+    original = b"# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\tsecret\n"
+    source.write_bytes(original)
+    video = fake_file(tmp_path, "cookie-video.mp4")
+    seen_snapshot: list[Path] = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            snapshot = Path(self.opts["cookiefile"])
+            seen_snapshot.append(snapshot)
+            assert snapshot != source
+            assert snapshot.read_bytes() == original
+            if os.name != "nt":
+                assert snapshot.stat().st_mode & 0o777 == 0o600
+            return self
+
+        def __exit__(self, *_args):
+            # Mirrors YoutubeDLCookieJar.save(): the working jar is rewritten
+            # when YoutubeDL closes.
+            Path(self.opts["cookiefile"]).write_bytes(b"refreshed jar")
+            return False
+
+        def extract_info(self, _url, download=True):
+            return {"title": "Cookie test", "duration": 1}
+
+        def prepare_filename(self, _info):
+            return str(video)
+
+    opts = {
+        "cookiefile": str(source),
+        "outtmpl": str(tmp_path / "cookie-output_%(id)s.%(ext)s"),
+    }
+    with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+        result = d._download_sync("https://www.instagram.com/reel/test/", opts)
+
+    assert result.success
+    assert source.read_bytes() == original
+    assert len(seen_snapshot) == 1
+    assert not seen_snapshot[0].exists()
+    assert opts["cookiefile"] == str(source)
+
+
+def test_download_sync_removes_cookie_snapshot_after_unexpected_error(tmp_path):
+    d = make_d(tmp_path)
+    source = tmp_path / "instagram-cookies.txt"
+    source.write_text("# Netscape HTTP Cookie File\n")
+    seen_snapshot: list[Path] = []
+
+    def fail_after_snapshot(_url, opts):
+        snapshot = Path(opts["cookiefile"])
+        seen_snapshot.append(snapshot)
+        assert snapshot.exists()
+        raise OSError(30, "Read-only file system")
+
+    with patch.object(d, "_download_sync_with_opts", side_effect=fail_after_snapshot):
+        with pytest.raises(OSError, match="Read-only file system"):
+            d._download_sync(
+                "https://www.instagram.com/reel/test/",
+                {"cookiefile": str(source)},
+            )
+
+    assert len(seen_snapshot) == 1
+    assert not seen_snapshot[0].exists()
+
+
+def test_concurrent_downloads_get_distinct_cookie_snapshots(tmp_path):
+    d = make_d(tmp_path)
+    source = tmp_path / "instagram-cookies.txt"
+    source.write_text("# Netscape HTTP Cookie File\n")
+    barrier = threading.Barrier(2)
+    seen_paths: list[Path] = []
+    seen_lock = threading.Lock()
+
+    def inspect_snapshot(_url, opts):
+        snapshot = Path(opts["cookiefile"])
+        with seen_lock:
+            seen_paths.append(snapshot)
+        barrier.wait(timeout=5)
+        assert snapshot.exists()
+        snapshot.write_text("updated")
+        return DownloadResult(success=True)
+
+    opts = {"cookiefile": str(source)}
+    with patch.object(d, "_download_sync_with_opts", side_effect=inspect_snapshot):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda _: d._download_sync("https://www.instagram.com/reel/concurrent/", opts),
+                    range(2),
+                )
+            )
+
+    assert all(result.success for result in results)
+    assert len(set(seen_paths)) == 2
+    assert all(not path.exists() for path in seen_paths)
+    assert source.read_text() == "# Netscape HTTP Cookie File\n"
+
+
+def test_invalid_cookie_is_not_restored_for_kkinstagram_retry(tmp_path):
+    """Once rejected, the jar must stay disabled for later mirror fallbacks."""
+
+    from yt_dlp.utils import DownloadError
+
+    d = make_d(tmp_path)
+    source = tmp_path / "instagram-cookies.txt"
+    source.write_text("# Netscape HTTP Cookie File\n")
+    video = tmp_path / "mirror-video.mp4"
+    calls: list[dict] = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+            calls.append(opts.copy())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=True):
+            call_number = len(calls)
+            if call_number == 1:
+                raise DownloadError("does not look like a netscape format cookies file")
+            if call_number == 2:
+                raise DownloadError("login required")
+            video.write_bytes(b"video")
+            return {"title": "Mirror", "duration": 1}
+
+        def prepare_filename(self, _info):
+            return str(video)
+
+    opts = {
+        "cookiefile": str(source),
+        "outtmpl": str(tmp_path / "mirror-output_%(id)s.%(ext)s"),
+    }
+    with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+        result = d._download_sync("https://www.instagram.com/reel/test/", opts)
+
+    assert result.success
+    assert len(calls) == 3
+    first_snapshot = Path(calls[0]["cookiefile"])
+    assert first_snapshot != source
+    assert "cookiefile" not in calls[1]
+    assert "cookiefile" not in calls[2]
+    assert not first_snapshot.exists()
 
 
 def test_get_cached_media_type_non_empty_but_no_known_keys(tmp_path):

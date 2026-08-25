@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -559,6 +560,47 @@ class VideoDownloader:
         except Exception as e:
             logger.warning("Не удалось загрузить Instagram cookies для HTML-скрапинга: %s", e)
             return None
+
+    def _prepare_ydl_cookie_snapshot(self, ydl_opts: dict) -> tuple[dict, Optional[str]]:
+        """Give yt-dlp a private writable copy of a configured cookie jar.
+
+        yt-dlp saves its cookie jar when ``YoutubeDL`` closes, even when the
+        caller only intended to read an existing file. Production cookie files
+        are deliberately mounted read-only, so every download gets a unique
+        snapshot in the system temp directory. Keeping the snapshot local to
+        ``_download_sync`` also prevents concurrent downloads from rewriting the
+        same jar.
+        """
+
+        prepared_opts = ydl_opts.copy()
+        cookiefile = prepared_opts.get("cookiefile")
+        if not isinstance(cookiefile, (str, os.PathLike)):
+            return prepared_opts, None
+
+        source_path = os.fspath(cookiefile)
+        if not os.path.isfile(source_path):
+            # Preserve the old behaviour for a file that disappeared between
+            # option construction and execution: yt-dlp will report/retry it.
+            return prepared_opts, None
+
+        fd, snapshot_path = tempfile.mkstemp(
+            prefix=".reels-downloader-cookie-",
+            suffix=".txt",
+        )
+        os.close(fd)
+        try:
+            # copyfile copies bytes, not the source's read-only mode.
+            shutil.copyfile(source_path, snapshot_path)
+            os.chmod(snapshot_path, 0o600)
+        except Exception:
+            try:
+                os.remove(snapshot_path)
+            except OSError:
+                pass
+            raise
+
+        prepared_opts["cookiefile"] = snapshot_path
+        return prepared_opts, snapshot_path
 
     @staticmethod
     def _instagram_image_key(image_url: str) -> str:
@@ -1726,6 +1768,33 @@ class VideoDownloader:
     def _download_sync(self, url: str, ydl_opts: dict) -> DownloadResult:
         """Синхронная функция скачивания для запуска в executor."""
 
+        cookie_snapshot: Optional[str] = None
+        try:
+            try:
+                prepared_opts, cookie_snapshot = self._prepare_ydl_cookie_snapshot(ydl_opts)
+            except OSError as e:
+                # Public media can still work without cookies. Keep the
+                # technical failure in server logs instead of exposing a temp
+                # filesystem error to the user.
+                logger.warning(
+                    "Не удалось создать рабочую копию cookies; продолжаю без cookies: %s",
+                    e,
+                )
+                prepared_opts = ydl_opts.copy()
+                prepared_opts.pop("cookiefile", None)
+            return self._download_sync_with_opts(url, prepared_opts)
+        finally:
+            if cookie_snapshot:
+                try:
+                    os.remove(cookie_snapshot)
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    logger.warning("Не удалось удалить временную копию cookies: %s", e)
+
+    def _download_sync_with_opts(self, url: str, ydl_opts: dict) -> DownloadResult:
+        """Run yt-dlp while the caller owns the cookie snapshot lifecycle."""
+
         attempt_downloads: list[list[str]] = []
 
         def cleanup_failed_attempts() -> None:
@@ -1977,8 +2046,9 @@ class VideoDownloader:
             )
             return result
 
+        active_ydl_opts = ydl_opts
         try:
-            return run_attempt(url, ydl_opts)
+            return run_attempt(url, active_ydl_opts)
 
         except DownloadError as e:
             cleanup_failed_attempts()
@@ -1996,8 +2066,9 @@ class VideoDownloader:
                 )
                 ydl_opts_no_cookies = ydl_opts.copy()
                 ydl_opts_no_cookies.pop("cookiefile", None)
+                active_ydl_opts = ydl_opts_no_cookies
                 try:
-                    return run_attempt(url, ydl_opts_no_cookies)
+                    return run_attempt(url, active_ydl_opts)
                 except DownloadError as e2:
                     cleanup_failed_attempts()
                     e = e2
@@ -2011,7 +2082,7 @@ class VideoDownloader:
                         "Instagram требует авторизации. Пробую fallback через kkinstagram: %s",
                         kk_url,
                     )
-                    ydl_opts_kk = ydl_opts.copy()
+                    ydl_opts_kk = active_ydl_opts.copy()
                     ydl_opts_kk["user_agent"] = TELEGRAM_BOT_USER_AGENT
                     http_headers = ydl_opts_kk.get("http_headers")
                     if not isinstance(http_headers, dict):
