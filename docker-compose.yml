@@ -1,6 +1,6 @@
 services:
   bot:
-    image: ghcr.io/meldxkviel/reels-downloader-bot:latest
+    image: ${BOT_IMAGE:-ghcr.io/meldxkviel/reels-downloader-bot:latest}
     container_name: downloader-bot
     restart: unless-stopped
     depends_on:
@@ -11,8 +11,8 @@ services:
       - ADMIN_USERS=${ADMIN_USERS}
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/downloader_bot
       - DOWNLOAD_DIR=/app/downloads
-      - YT_COOKIES_FILE=${YT_COOKIES_FILE:-}
-      - INSTA_COOKIES_FILE=${INSTA_COOKIES_FILE:-}
+      - YT_COOKIES_FILE=/app/cookies.txt
+      - INSTA_COOKIES_FILE=/app/instagram-cookies.txt
     volumes:
       - ./downloads:/app/downloads
       - ${YT_COOKIES_FILE_HOST_PATH:-./cookies.txt}:/app/cookies.txt:ro

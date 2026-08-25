@@ -231,6 +231,38 @@ def test_rich_carousel_file_id_variant_is_inline_safe():
 
 
 @pytest.mark.asyncio
+async def test_pp_target_mirror_photo_carousel_skips_ytdlp(tmp_path: Path):
+    d = VideoDownloader(str(tmp_path))
+    url = "https://www.instagram.com/p/MIRRORONLY/"
+    mirror_urls = [_cdn("mirror-1"), _cdn("mirror-2")]
+    mirror_html = (
+        "".join(f'<meta property="og:image" content="{image_url}">' for image_url in mirror_urls)
+        + '{"media_type":1}'
+    )
+
+    def fake_get(candidate: str, **_kwargs):
+        return mirror_html if "kkinstagram" in candidate else None
+
+    def fake_download(_image_url: str, output_base: str):
+        path = f"{output_base}.jpg"
+        Path(path).write_bytes(b"x" * 2048)
+        return path
+
+    with (
+        patch.object(d, "_http_get_html", side_effect=fake_get),
+        patch.object(d, "_download_image_sync", side_effect=fake_download),
+        patch.object(d, "_download_sync") as download_sync,
+    ):
+        result = await d.download(url)
+
+    assert result.success
+    assert result.media_type_confirmed is True
+    assert result.carousel_slides is not None
+    assert [slide.url for slide in result.carousel_slides] == mirror_urls
+    download_sync.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_pp_ambiguous_cover_without_cookies_ytdlp_video_wins(tmp_path: Path):
     """A bare og:image can be a video cover, so yt-dlp must verify it even without cookies."""
     d = VideoDownloader(str(tmp_path))

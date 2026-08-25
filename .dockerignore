@@ -24,6 +24,14 @@ build/
 # Environment
 .env
 .env.local
+.env.*
+*.env
+
+# Authentication cookies and local sync output
+cookies/
+cookies.txt
+instagram-cookies.txt
+cookie-sync-preview/
 
 # Downloads
 downloads/

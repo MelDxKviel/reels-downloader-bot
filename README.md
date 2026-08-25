@@ -78,13 +78,13 @@ POSTGRES_PASSWORD=postgres        # Docker Compose only
 # Optional
 DEFAULT_LANGUAGE=ru                      # Interface language: ru or en (default: ru)
 DOWNLOAD_DIR=downloads                   # Directory for downloaded files
-YT_COOKIES_FILE=./cookies/youtube.txt    # Cookies for age-restricted YouTube
-INSTA_COOKIES_FILE=./cookies/instagram.txt  # Cookies for Instagram (private accounts)
+YT_COOKIES_FILE=./cookies.txt            # Cookies for age-restricted YouTube
+INSTA_COOKIES_FILE=./instagram-cookies.txt  # Cookies for Instagram (private accounts)
 VIDEO_STORAGE_CHAT_ID=-1001234567890     # Chat for inline pre-upload (fallback: first ADMIN_USERS)
 
 # Docker Compose only
-YT_COOKIES_FILE_HOST_PATH=./cookies/youtube.txt     # Host path to YouTube cookies
-INSTA_COOKIES_FILE_HOST_PATH=./cookies/instagram.txt  # Host path to Instagram cookies
+YT_COOKIES_FILE_HOST_PATH=./cookies.txt               # Host path to YouTube cookies
+INSTA_COOKIES_FILE_HOST_PATH=./instagram-cookies.txt  # Host path to Instagram cookies
 ```
 
 ### Environment Variables
@@ -209,20 +209,24 @@ For a detailed step-by-step guide (exporting from Chrome/Firefox, Docker setup, 
 
 **[→ COOKIES_GUIDE.md](./COOKIES_GUIDE.md)**
 
+Production Instagram cookies can be refreshed without direct SSH access:
+
+```bash
+uv run python scripts/publish_instagram_cookies.py --browser firefox
+```
+
 **Quick setup:**
 
 ```bash
-mkdir -p cookies
 # copy exported files
-cp ~/Downloads/youtube.com_cookies.txt cookies/youtube.txt
-cp ~/Downloads/instagram.com_cookies.txt cookies/instagram.txt
-echo "cookies/" >> .gitignore
+cp ~/Downloads/youtube.com_cookies.txt cookies.txt
+cp ~/Downloads/instagram.com_cookies.txt instagram-cookies.txt
 ```
 
 ```env
 # .env (local run)
-YT_COOKIES_FILE=./cookies/youtube.txt
-INSTA_COOKIES_FILE=./cookies/instagram.txt
+YT_COOKIES_FILE=./cookies.txt
+INSTA_COOKIES_FILE=./instagram-cookies.txt
 ```
 
 ```yaml
@@ -230,10 +234,11 @@ INSTA_COOKIES_FILE=./cookies/instagram.txt
 services:
   bot:
     environment:
-      YT_COOKIES_FILE: /app/cookies/youtube.txt
-      INSTA_COOKIES_FILE: /app/cookies/instagram.txt
+      YT_COOKIES_FILE: /app/cookies.txt
+      INSTA_COOKIES_FILE: /app/instagram-cookies.txt
     volumes:
-      - ./cookies:/app/cookies:ro
+      - ${YT_COOKIES_FILE_HOST_PATH:-./cookies.txt}:/app/cookies.txt:ro
+      - ${INSTA_COOKIES_FILE_HOST_PATH:-./instagram-cookies.txt}:/app/instagram-cookies.txt:ro
 ```
 
 > ⚠️ Cookies are tied to a browser session and may expire — re-export them if you encounter auth errors.

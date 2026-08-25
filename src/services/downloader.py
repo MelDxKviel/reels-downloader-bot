@@ -722,18 +722,20 @@ class VideoDownloader:
 
             candidate_path = (urlparse(candidate).path or "").lower()
             is_target_embed = is_instagram_url(candidate) and "/embed" in candidate_path
+            is_target_mirror = is_kkinstagram_url(candidate)
             target_payload = (
                 self._extract_instagram_target_payload(html, shortcode)
                 if is_instagram_url(candidate) and not is_target_embed
                 else None
             )
             is_target_main = target_payload is not None
+            is_trusted_target = is_target_embed or is_target_main or is_target_mirror
             parsed = self._parse_instagram_html(target_payload or html)
             if is_target_embed:
                 image_urls = trusted_image_urls
             elif is_target_main:
                 image_urls = target_main_image_urls
-            elif is_kkinstagram_url(candidate):
+            elif is_target_mirror:
                 image_urls = mirror_image_urls
             else:
                 image_urls = fallback_image_urls
@@ -742,9 +744,9 @@ class VideoDownloader:
                     image_urls.append(img)
             if parsed["video_url"] and not video_url:
                 video_url = parsed["video_url"]
-            if parsed.get("has_video_marker") and (is_target_embed or is_target_main):
+            if parsed.get("has_video_marker") and is_trusted_target:
                 has_video_marker = True
-            if parsed.get("media_kind") == "photo" and (is_target_embed or is_target_main):
+            if parsed.get("media_kind") == "photo" and is_trusted_target:
                 has_photo_marker = True
             if parsed["title"] and not title:
                 title = parsed["title"]

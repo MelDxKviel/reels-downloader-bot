@@ -1,0 +1,214 @@
+name: Sync Instagram Cookies
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: production-cookie-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Validate and install cookies
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Decode and validate cookie file
+        env:
+          COOKIE_ARCHIVE: ${{ secrets.INSTA_COOKIES_GZIP_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          if [ -z "${COOKIE_ARCHIVE:-}" ]; then
+            echo "INSTA_COOKIES_GZIP_B64 is not configured" >&2
+            exit 1
+          fi
+
+          printf '%s' "$COOKIE_ARCHIVE" \
+            | base64 --decode \
+            | gzip -dc > instagram-cookies.txt
+          chmod 600 instagram-cookies.txt
+
+          cookie_file=instagram-cookies.txt
+          test -s "$cookie_file"
+          test "$(head -n 1 "$cookie_file")" = "# Netscape HTTP Cookie File"
+          test "$(wc -c < "$cookie_file")" -le 1048576
+
+          awk -F '\t' -v now="$(date +%s)" '
+            /^[[:space:]]*$/ { next }
+            /^#/ && $0 !~ /^#HttpOnly_/ { next }
+            NF < 7 { invalid_row = 1; next }
+            NF >= 7 {
+              domain = $1
+              sub(/^#HttpOnly_/, "", domain)
+              domain = tolower(domain)
+              if (domain !~ /(^|[.])instagram[.]com$/) {
+                invalid_domain = 1
+              }
+              if ($6 == "sessionid" && $7 != "" && ($5 == "0" || $5 + 0 > now)) {
+                valid_session = 1
+              }
+            }
+            END { exit (valid_session && !invalid_domain && !invalid_row) ? 0 : 1 }
+          ' "$cookie_file" || {
+            echo "Cookie file must contain only Instagram cookies and a valid sessionid" >&2
+            exit 1
+          }
+
+      - name: Upload validated cookies
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || '22' }}
+          fingerprint: ${{ secrets.DEPLOY_FINGERPRINT }}
+          source: instagram-cookies.txt
+          target: "${{ secrets.DEPLOY_PATH }}/.cookie-upload-${{ github.run_id }}"
+          overwrite: true
+
+      - name: Install cookies and restart bot
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          COOKIE_STAGE_NAME: .cookie-upload-${{ github.run_id }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          RUN_ID: ${{ github.run_id }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || '22' }}
+          fingerprint: ${{ secrets.DEPLOY_FINGERPRINT }}
+          command_timeout: 20m
+          envs: COOKIE_STAGE_NAME,DEPLOY_PATH,RUN_ID
+          script: |
+            set -eu
+
+            case "$COOKIE_STAGE_NAME" in
+              .cookie-upload-[0-9]*) ;;
+              *) echo "Invalid staging directory" >&2; exit 1 ;;
+            esac
+
+            cd "$DEPLOY_PATH"
+            stage_dir="$DEPLOY_PATH/$COOKIE_STAGE_NAME"
+            stage_file="$stage_dir/instagram-cookies.txt"
+            target_file="$DEPLOY_PATH/instagram-cookies.txt"
+            temp_file="$DEPLOY_PATH/.instagram-cookies.txt.$RUN_ID.tmp"
+            backup_file="$DEPLOY_PATH/.instagram-cookies.txt.$RUN_ID.backup"
+            completed=0
+            installed=0
+            had_previous=0
+
+            cleanup() {
+              status=$?
+              trap - EXIT HUP INT TERM
+              if [ "$completed" -ne 1 ] && [ "$installed" -eq 1 ]; then
+                if [ "$had_previous" -eq 1 ]; then
+                  mv -f "$backup_file" "$target_file" || true
+                else
+                  rm -f -- "$target_file" || true
+                fi
+                docker compose up -d --force-recreate bot >/dev/null 2>&1 || true
+              fi
+              rm -f -- "$stage_file" "$temp_file" "$backup_file" || true
+              rmdir -- "$stage_dir" 2>/dev/null || true
+              exit "$status"
+            }
+            trap cleanup EXIT
+            trap 'exit 130' HUP INT TERM
+
+            command -v flock >/dev/null 2>&1 || {
+              echo "flock is required for safe cookie installation" >&2
+              exit 1
+            }
+            exec 9>"$DEPLOY_PATH/.deploy.lock"
+            flock -w 600 9
+
+            export YT_COOKIES_FILE_HOST_PATH=./cookies.txt
+            export INSTA_COOKIES_FILE_HOST_PATH=./instagram-cookies.txt
+            container_id="$(docker compose ps --all --quiet bot 2>/dev/null || true)"
+            current_image=""
+            if [ -n "$container_id" ]; then
+              current_image="$(docker inspect --format '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
+            fi
+            case "$current_image" in
+              ghcr.io/meldxkviel/reels-downloader-bot:*) BOT_IMAGE="$current_image" ;;
+              *) BOT_IMAGE=ghcr.io/meldxkviel/reels-downloader-bot:latest ;;
+            esac
+            export BOT_IMAGE
+
+            test -f "$stage_file"
+            chmod 600 "$stage_file"
+            test -s "$stage_file"
+            test "$(head -n 1 "$stage_file")" = "# Netscape HTTP Cookie File"
+            awk -F '\t' -v now="$(date +%s)" '
+              /^[[:space:]]*$/ { next }
+              /^#/ && $0 !~ /^#HttpOnly_/ { next }
+              NF < 7 { invalid_row = 1; next }
+              NF >= 7 {
+                domain = $1
+                sub(/^#HttpOnly_/, "", domain)
+                domain = tolower(domain)
+                if (domain !~ /(^|[.])instagram[.]com$/) invalid_domain = 1
+                if ($6 == "sessionid" && $7 != "" && ($5 == "0" || $5 + 0 > now)) {
+                  valid_session = 1
+                }
+              }
+              END { exit (valid_session && !invalid_domain && !invalid_row) ? 0 : 1 }
+            ' "$stage_file"
+
+            if [ -L "$target_file" ]; then
+              echo "Instagram cookie path must not be a symlink" >&2
+              exit 1
+            elif [ -d "$target_file" ]; then
+              rmdir "$target_file" || {
+                echo "Instagram cookie path is a non-empty directory" >&2
+                exit 1
+              }
+            elif [ -e "$target_file" ] && [ ! -f "$target_file" ]; then
+              echo "Instagram cookie path is not a regular file" >&2
+              exit 1
+            fi
+
+            if [ -f "$target_file" ]; then
+              install -m 600 "$target_file" "$backup_file"
+              had_previous=1
+            fi
+            install -m 600 "$stage_file" "$temp_file"
+            mv -f "$temp_file" "$target_file"
+            installed=1
+
+            if [ -L cookies.txt ]; then
+              echo "YouTube cookie path must not be a symlink" >&2
+              exit 1
+            elif [ -d cookies.txt ]; then
+              rmdir cookies.txt || {
+                echo "YouTube cookie path is a non-empty directory" >&2
+                exit 1
+              }
+            fi
+            if [ ! -e cookies.txt ]; then
+              install -m 600 /dev/null cookies.txt
+            elif [ ! -f cookies.txt ]; then
+              echo "YouTube cookie path is not a regular file" >&2
+              exit 1
+            fi
+            chmod 600 cookies.txt
+
+            docker compose up -d --force-recreate bot
+            container_id="$(docker compose ps -q bot)"
+            test -n "$container_id"
+            docker exec "$container_id" sh -ec '
+              test "$INSTA_COOKIES_FILE" = /app/instagram-cookies.txt
+              test -s "$INSTA_COOKIES_FILE"
+              test "$(head -n 1 "$INSTA_COOKIES_FILE")" = "# Netscape HTTP Cookie File"
+            '
+
+            completed=1
+            echo "Instagram cookies installed and bot restarted"

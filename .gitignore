@@ -70,4 +70,5 @@ Thumbs.db
 # Cookies + sync-script outputs (secrets — never commit)
 cookies.txt
 instagram-cookies.txt
+cookies/
 cookie-sync-preview/

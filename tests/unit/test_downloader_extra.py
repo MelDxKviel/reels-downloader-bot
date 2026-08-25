@@ -406,6 +406,8 @@ def test_fetch_instagram_media_info_ignores_main_page_auxiliary_media(tmp_path):
     )
 
     def fake_get(candidate, **_kwargs):
+        if "kkinstagram" in candidate:
+            return None
         return embed_html if "/embed" in candidate else main_html
 
     with patch.object(d, "_http_get_html", side_effect=fake_get):
@@ -456,6 +458,49 @@ def test_fetch_instagram_media_info_prefers_more_complete_target_mirror(tmp_path
 
     assert result["image_urls"] == mirror_urls
     assert result["media_kind"] == "photo"
+
+
+def test_fetch_instagram_media_info_trusts_target_mirror_photo_marker(tmp_path):
+    d = make_d(tmp_path)
+    mirror_urls = [
+        "https://scontent.cdninstagram.com/v/t51/one.jpg",
+        "https://scontent.cdninstagram.com/v/t51/two.jpg",
+    ]
+    mirror_html = (
+        "".join(f'<meta property="og:image" content="{url}">' for url in mirror_urls)
+        + '{"media_type":1}'
+    )
+
+    def fake_get(candidate, **_kwargs):
+        return mirror_html if "kkinstagram" in candidate else None
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result is not None
+    assert result["image_urls"] == mirror_urls
+    assert result["media_kind"] == "photo"
+    assert result["has_video"] is False
+
+
+def test_fetch_instagram_media_info_trusts_target_mirror_video_marker(tmp_path):
+    d = make_d(tmp_path)
+    cover = "https://scontent.cdninstagram.com/v/t51/cover.jpg"
+    mirror_html = (
+        f'<meta property="og:image" content="{cover}">'
+        '{"media_type":2,"video_versions":'
+        '[{"url":"https://cdn.example/video.mp4"}]}'
+    )
+
+    def fake_get(candidate, **_kwargs):
+        return mirror_html if "kkinstagram" in candidate else None
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result is not None
+    assert result["has_video"] is True
+    assert result["media_kind"] == "video"
 
 
 def test_fetch_instagram_media_info_counts_distinct_assets_per_source(tmp_path):

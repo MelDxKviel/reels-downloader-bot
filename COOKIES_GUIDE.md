@@ -90,13 +90,49 @@ INSTA_COOKIES_FILE=cookies/instagram.txt
 services:
   bot:
     environment:
-      YT_COOKIES_FILE: /app/cookies/youtube.txt
-      INSTA_COOKIES_FILE: /app/cookies/instagram.txt
+      YT_COOKIES_FILE: /app/cookies.txt
+      INSTA_COOKIES_FILE: /app/instagram-cookies.txt
     volumes:
-      - ./cookies:/app/cookies:ro
+      - ${YT_COOKIES_FILE_HOST_PATH:-./cookies.txt}:/app/cookies.txt:ro
+      - ${INSTA_COOKIES_FILE_HOST_PATH:-./instagram-cookies.txt}:/app/instagram-cookies.txt:ro
 ```
 
-Флаг `:ro` монтирует папку в режиме «только чтение» — дополнительная защита.
+Флаг `:ro` монтирует файлы в режиме «только чтение» — дополнительная защита. Пути на
+хосте при необходимости задаются через `YT_COOKIES_FILE_HOST_PATH` и
+`INSTA_COOKIES_FILE_HOST_PATH`.
+
+---
+
+## Продакшен без прямого доступа к серверу
+
+В репозитории есть ручной GitHub Actions workflow `Sync Instagram Cookies`. Он получает
+cookies из зашифрованного GitHub secret, проверяет Netscape-формат и активный `sessionid`,
+атомарно заменяет файл на сервере и пересоздаёт контейнер бота. Значения cookies в логи не
+выводятся.
+
+Один раз авторизуйте [GitHub CLI](https://cli.github.com/) командой `gh auth login`. Затем из
+корня репозитория можно прочитать cookies прямо из Firefox:
+
+```bash
+uv run python scripts/publish_instagram_cookies.py --browser firefox
+```
+
+Или передать Netscape-файл, экспортированный расширением браузера:
+
+```bash
+uv run python scripts/publish_instagram_cookies.py \
+  --cookie-file ~/Downloads/instagram.com_cookies.txt
+```
+
+Скрипт оставляет только домены `instagram.com`, требует непросроченный `sessionid`, обновляет
+secret `INSTA_COOKIES_GZIP_B64` через stdin и запускает workflow. Поэтому SSH с локального
+компьютера не нужен — сервер использует уже настроенные deploy-secrets GitHub Actions.
+
+Для одной проверки без изменений:
+
+```bash
+uv run python scripts/publish_instagram_cookies.py --browser firefox --dry-run
+```
 
 ---
 

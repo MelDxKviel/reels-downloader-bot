@@ -6,25 +6,57 @@ on:
     branches: ["main"]
     types: [completed]
 
+concurrency:
+  group: production-cd
+  cancel-in-progress: false
+
 jobs:
+  gate:
+    name: Ignore stale CI runs
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+    outputs:
+      current: ${{ steps.current.outputs.current }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+
+      - name: Compare the tested commit with main
+        id: current
+        env:
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$TESTED_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping stale CI result for $TESTED_SHA"
+          fi
+
   docker:
     name: Docker Build & Push
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.conclusion == 'success'
+    needs: [gate]
+    if: needs.gate.outputs.current == 'true'
     permissions:
       contents: read
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -32,15 +64,15 @@ jobs:
 
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-
+            type=raw,value=sha-${{ github.event.workflow_run.head_sha }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
@@ -52,20 +84,124 @@ jobs:
   deploy:
     name: Deploy to Server
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [docker]
-    permissions: {}
+    permissions:
+      contents: read
 
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Upload Docker Compose configuration
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || '22' }}
+          fingerprint: ${{ secrets.DEPLOY_FINGERPRINT }}
+          source: docker-compose.yml
+          target: "${{ secrets.DEPLOY_PATH }}/.deploy-${{ github.run_id }}"
+          overwrite: true
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          BOT_IMAGE: ghcr.io/meldxkviel/reels-downloader-bot:sha-${{ github.event.workflow_run.head_sha }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_STAGE_NAME: .deploy-${{ github.run_id }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || '22' }}
+          fingerprint: ${{ secrets.DEPLOY_FINGERPRINT }}
+          command_timeout: 20m
+          envs: BOT_IMAGE,DEPLOY_PATH,DEPLOY_STAGE_NAME,DEPLOY_USER,GHCR_TOKEN,RUN_ID
           script: |
-            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.DEPLOY_USER }}" --password-stdin
-            cd ${{ secrets.DEPLOY_PATH }}
+            set -eu
+
+            case "$DEPLOY_STAGE_NAME" in
+              .deploy-[0-9]*) ;;
+              *) echo "Invalid deploy staging directory" >&2; exit 1 ;;
+            esac
+
+            cd "$DEPLOY_PATH"
+            stage_dir="$DEPLOY_PATH/$DEPLOY_STAGE_NAME"
+            stage_file="$stage_dir/docker-compose.yml"
+            temp_compose="$DEPLOY_PATH/.docker-compose.yml.$RUN_ID.tmp"
+
+            cleanup() {
+              status=$?
+              trap - EXIT HUP INT TERM
+              rm -f -- "$stage_file" "$temp_compose" || true
+              rmdir -- "$stage_dir" 2>/dev/null || true
+              docker logout ghcr.io >/dev/null 2>&1 || true
+              exit "$status"
+            }
+            trap cleanup EXIT
+            trap 'exit 130' HUP INT TERM
+
+            command -v flock >/dev/null 2>&1 || {
+              echo "flock is required for safe deployment" >&2
+              exit 1
+            }
+            exec 9>"$DEPLOY_PATH/.deploy.lock"
+            flock -w 600 9
+
+            export BOT_IMAGE
+            export YT_COOKIES_FILE_HOST_PATH=./cookies.txt
+            export INSTA_COOKIES_FILE_HOST_PATH=./instagram-cookies.txt
+            test -f "$stage_file"
+            docker compose -f "$stage_file" config -q
+            install -m 644 "$stage_file" "$temp_compose"
+            mv -f "$temp_compose" docker-compose.yml
+
+            ensure_cookie_file() {
+              cookie_path="$1"
+              if [ -L "$cookie_path" ]; then
+                echo "Cookie mount path must not be a symlink: $cookie_path" >&2
+                exit 1
+              elif [ -d "$cookie_path" ]; then
+                rmdir "$cookie_path" || {
+                  echo "Cookie mount path is a non-empty directory: $cookie_path" >&2
+                  exit 1
+                }
+              fi
+              if [ ! -e "$cookie_path" ]; then
+                install -m 600 /dev/null "$cookie_path"
+              elif [ ! -f "$cookie_path" ]; then
+                echo "Cookie mount path is not a regular file: $cookie_path" >&2
+                exit 1
+              fi
+              chmod 600 "$cookie_path"
+            }
+
+            ensure_cookie_file cookies.txt
+            ensure_cookie_file instagram-cookies.txt
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$DEPLOY_USER" --password-stdin
             docker compose pull bot
             docker compose up -d bot
+
+            image_repository=ghcr.io/meldxkviel/reels-downloader-bot
+            kept_previous=0
+            docker image ls "$image_repository" --format '{{.Repository}}:{{.Tag}}' |
+              while IFS= read -r image_ref; do
+                case "$image_ref" in
+                  "$image_repository":sha-*) ;;
+                  *) continue ;;
+                esac
+                if [ "$image_ref" = "$BOT_IMAGE" ]; then
+                  continue
+                fi
+                kept_previous=$((kept_previous + 1))
+                if [ "$kept_previous" -gt 2 ]; then
+                  docker image rm "$image_ref" >/dev/null 2>&1 || true
+                fi
+              done
             docker image prune -f
-            docker logout ghcr.io
