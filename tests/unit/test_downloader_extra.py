@@ -13,8 +13,14 @@ import pytest
 from src.services.downloader import DownloadResult, VideoDownloader
 
 
+async def _in_process_worker(service, url, allow_carousel):
+    # Source orchestration unit tests replace external backends in this process.
+    # Separate worker integration tests exercise production process isolation.
+    return await service._download_source(url, allow_carousel)
+
+
 def make_d(tmp_path: Path) -> VideoDownloader:
-    return VideoDownloader(str(tmp_path))
+    return VideoDownloader(str(tmp_path), worker_runner=_in_process_worker)
 
 
 def fake_file(tmp_path: Path, name: str = "v.mp4", size: int = 1024) -> Path:
@@ -136,13 +142,13 @@ def test_looks_like_netscape_only_empty_then_eof(tmp_path):
 
 def test_get_youtube_cookiefile_none_when_unset(tmp_path):
     d = make_d(tmp_path)
-    with patch("src.services.downloader.YT_COOKIES_FILE", None):
+    with patch("src.services.cookies.YT_COOKIES_FILE", None):
         assert d._get_youtube_cookiefile() is None
 
 
 def test_get_youtube_cookiefile_none_when_missing(tmp_path):
     d = make_d(tmp_path)
-    with patch("src.services.downloader.YT_COOKIES_FILE", "/nope/cookies.txt"):
+    with patch("src.services.cookies.YT_COOKIES_FILE", "/nope/cookies.txt"):
         assert d._get_youtube_cookiefile() is None
 
 
@@ -150,7 +156,7 @@ def test_get_youtube_cookiefile_invalid_format(tmp_path):
     f = tmp_path / "bad.txt"
     f.write_text('{"not": "netscape"}')
     d = make_d(tmp_path)
-    with patch("src.services.downloader.YT_COOKIES_FILE", str(f)):
+    with patch("src.services.cookies.YT_COOKIES_FILE", str(f)):
         assert d._get_youtube_cookiefile() is None
 
 
@@ -158,19 +164,19 @@ def test_get_youtube_cookiefile_valid(tmp_path):
     f = tmp_path / "ok.txt"
     f.write_text("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tFALSE\t0\tSID\tv\n")
     d = make_d(tmp_path)
-    with patch("src.services.downloader.YT_COOKIES_FILE", str(f)):
+    with patch("src.services.cookies.YT_COOKIES_FILE", str(f)):
         assert d._get_youtube_cookiefile() == str(f)
 
 
 def test_get_instagram_cookiefile_none_when_unset(tmp_path):
     d = make_d(tmp_path)
-    with patch("src.services.downloader.INSTA_COOKIES_FILE", None):
+    with patch("src.services.cookies.INSTA_COOKIES_FILE", None):
         assert d._get_instagram_cookiefile() is None
 
 
 def test_get_instagram_cookiefile_none_when_missing(tmp_path):
     d = make_d(tmp_path)
-    with patch("src.services.downloader.INSTA_COOKIES_FILE", "/nope.txt"):
+    with patch("src.services.cookies.INSTA_COOKIES_FILE", "/nope.txt"):
         assert d._get_instagram_cookiefile() is None
 
 
@@ -178,7 +184,7 @@ def test_get_instagram_cookiefile_invalid_format(tmp_path):
     f = tmp_path / "bad.txt"
     f.write_text('{"foo": "bar"}')
     d = make_d(tmp_path)
-    with patch("src.services.downloader.INSTA_COOKIES_FILE", str(f)):
+    with patch("src.services.cookies.INSTA_COOKIES_FILE", str(f)):
         assert d._get_instagram_cookiefile() is None
 
 
@@ -186,7 +192,7 @@ def test_get_instagram_cookiefile_valid(tmp_path):
     f = tmp_path / "ok.txt"
     f.write_text("# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tFALSE\t0\tSID\tv\n")
     d = make_d(tmp_path)
-    with patch("src.services.downloader.INSTA_COOKIES_FILE", str(f)):
+    with patch("src.services.cookies.INSTA_COOKIES_FILE", str(f)):
         assert d._get_instagram_cookiefile() == str(f)
 
 
@@ -197,7 +203,7 @@ def test_get_ydl_opts_youtube_with_cookies(tmp_path):
     f = tmp_path / "c.txt"
     f.write_text("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tFALSE\t0\tSID\tv\n")
     d = make_d(tmp_path)
-    with patch("src.services.downloader.YT_COOKIES_FILE", str(f)):
+    with patch("src.services.cookies.YT_COOKIES_FILE", str(f)):
         opts = d._get_ydl_opts("out.%(ext)s", "https://youtube.com/watch?v=a")
     assert opts.get("cookiefile") == str(f)
 
@@ -206,7 +212,7 @@ def test_get_ydl_opts_instagram_with_cookies(tmp_path):
     f = tmp_path / "c.txt"
     f.write_text("# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tFALSE\t0\tSID\tv\n")
     d = make_d(tmp_path)
-    with patch("src.services.downloader.INSTA_COOKIES_FILE", str(f)):
+    with patch("src.services.cookies.INSTA_COOKIES_FILE", str(f)):
         opts = d._get_ydl_opts("out.%(ext)s", "https://www.instagram.com/reel/a/")
     assert opts.get("cookiefile") == str(f)
 
@@ -281,10 +287,10 @@ def test_parse_instagram_html_og_image_secure_url_variant():
 def test_http_get_html_url_error():
     with (
         patch(
-            "src.services.downloader.urllib.request.urlopen",
+            "src.services.instagram.urllib.request.urlopen",
             side_effect=urllib.error.URLError("nope"),
         ) as urlopen,
-        patch("src.services.downloader.time.sleep") as sleep,
+        patch("src.services.instagram.time.sleep") as sleep,
     ):
         assert VideoDownloader._http_get_html("https://x") is None
     assert urlopen.call_count == 3
@@ -301,10 +307,10 @@ def test_http_get_html_retries_504_then_succeeds():
 
     with (
         patch(
-            "src.services.downloader.urllib.request.urlopen",
+            "src.services.instagram.urllib.request.urlopen",
             side_effect=[timeout, fake],
         ) as urlopen,
-        patch("src.services.downloader.time.sleep") as sleep,
+        patch("src.services.instagram.time.sleep") as sleep,
     ):
         result = VideoDownloader._http_get_html("https://x")
 
@@ -319,7 +325,7 @@ def test_http_get_html_non_html_content_type():
     fake.read = MagicMock(return_value=b"{}")
     fake.__enter__ = MagicMock(return_value=fake)
     fake.__exit__ = MagicMock(return_value=False)
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
         assert VideoDownloader._http_get_html("https://x") is None
 
 
@@ -329,7 +335,7 @@ def test_http_get_html_success():
     fake.read = MagicMock(return_value=b"<html></html>")
     fake.__enter__ = MagicMock(return_value=fake)
     fake.__exit__ = MagicMock(return_value=False)
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
         result = VideoDownloader._http_get_html("https://x")
     assert result == "<html></html>"
 
@@ -359,7 +365,7 @@ def test_fetch_instagram_product_info_requires_exact_shortcode(tmp_path):
     opener = MagicMock()
     opener.open.return_value = response
 
-    with patch("src.services.downloader.urllib.request.build_opener", return_value=opener):
+    with patch("src.services.instagram.urllib.request.build_opener", return_value=opener):
         result = d._fetch_instagram_product_info("DcHWbs6H5GC", [cookie])
 
     assert result is None
@@ -378,7 +384,7 @@ def test_fetch_instagram_product_info_returns_exact_product(tmp_path):
     opener = MagicMock()
     opener.open.return_value = response
 
-    with patch("src.services.downloader.urllib.request.build_opener", return_value=opener):
+    with patch("src.services.instagram.urllib.request.build_opener", return_value=opener):
         result = d._fetch_instagram_product_info("DcHWbs6H5GC", [cookie])
 
     assert result == product
@@ -402,7 +408,7 @@ def test_fetch_instagram_product_info_accepts_canonical_private_shortcode(tmp_pa
     opener = MagicMock()
     opener.open.return_value = response
 
-    with patch("src.services.downloader.urllib.request.build_opener", return_value=opener):
+    with patch("src.services.instagram.urllib.request.build_opener", return_value=opener):
         result = d._fetch_instagram_product_info(private_shortcode, [cookie])
 
     assert result == product
@@ -790,7 +796,7 @@ def _make_fake_resp(content_type, body=b"x" * 5000):
 def test_download_image_sync_picks_ext_from_content_type(tmp_path, ct, expected_ext):
     d = make_d(tmp_path)
     fake = _make_fake_resp(ct)
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
         out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
     assert out is not None
     assert out.endswith("." + expected_ext)
@@ -799,7 +805,7 @@ def test_download_image_sync_picks_ext_from_content_type(tmp_path, ct, expected_
 def test_download_image_sync_picks_ext_from_url_path(tmp_path):
     d = make_d(tmp_path)
     fake = _make_fake_resp("image/unknown")
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
         out = d._download_image_sync("https://cdn/img.gif?q=1", str(tmp_path / "out"))
     assert out is not None
     assert out.endswith(".gif")
@@ -808,7 +814,7 @@ def test_download_image_sync_picks_ext_from_url_path(tmp_path):
 def test_download_image_sync_picks_jpg_fallback_when_url_ext_invalid(tmp_path):
     d = make_d(tmp_path)
     fake = _make_fake_resp("image/unknown")
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
         out = d._download_image_sync("https://cdn/img.toolongextension", str(tmp_path / "out"))
     assert out is not None
     assert out.endswith(".jpg")
@@ -817,7 +823,7 @@ def test_download_image_sync_picks_jpg_fallback_when_url_ext_invalid(tmp_path):
 def test_download_image_sync_rejects_non_image(tmp_path):
     d = make_d(tmp_path)
     fake = _make_fake_resp("text/html")
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
         out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
     assert out is None
 
@@ -826,10 +832,10 @@ def test_download_image_sync_url_error(tmp_path):
     d = make_d(tmp_path)
     with (
         patch(
-            "src.services.downloader.urllib.request.urlopen",
+            "src.services.instagram.urllib.request.urlopen",
             side_effect=urllib.error.URLError("nope"),
         ) as urlopen,
-        patch("src.services.downloader.time.sleep") as sleep,
+        patch("src.services.instagram.time.sleep") as sleep,
     ):
         out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
     assert out is None
@@ -849,10 +855,10 @@ def test_download_image_sync_retries_http_504(tmp_path):
     fake = _make_fake_resp("image/jpeg")
     with (
         patch(
-            "src.services.downloader.urllib.request.urlopen",
+            "src.services.instagram.urllib.request.urlopen",
             side_effect=[gateway_timeout, fake],
         ) as urlopen,
-        patch("src.services.downloader.time.sleep") as sleep,
+        patch("src.services.instagram.time.sleep") as sleep,
     ):
         out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
 
@@ -864,7 +870,7 @@ def test_download_image_sync_retries_http_504(tmp_path):
 def test_download_image_sync_rejects_tiny_file(tmp_path):
     d = make_d(tmp_path)
     fake = _make_fake_resp("image/jpeg", body=b"x" * 100)
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
         out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
     assert out is None
 
@@ -879,7 +885,7 @@ def test_download_image_sync_exceeds_max_filesize(tmp_path):
     fake.read = MagicMock(side_effect=[big_body, b""])
     fake.__enter__ = MagicMock(return_value=fake)
     fake.__exit__ = MagicMock(return_value=False)
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
         out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
     assert out is None
 
@@ -908,7 +914,7 @@ def test_extract_photo_frame_ffmpeg_fail(tmp_path):
     r = DownloadResult(success=True, file_path=str(v))
     proc = MagicMock()
     proc.returncode = 1
-    with patch("src.services.downloader.subprocess.run", return_value=proc):
+    with patch("src.services.media_io.subprocess.run", return_value=proc):
         assert d._extract_photo_frame(r) is None
 
 
@@ -919,7 +925,7 @@ def test_extract_photo_frame_no_output_file(tmp_path):
     r = DownloadResult(success=True, file_path=str(v))
     proc = MagicMock()
     proc.returncode = 0
-    with patch("src.services.downloader.subprocess.run", return_value=proc):
+    with patch("src.services.media_io.subprocess.run", return_value=proc):
         assert d._extract_photo_frame(r) is None
 
 
@@ -933,7 +939,7 @@ def test_extract_photo_frame_tiny_output_file(tmp_path):
     def fake_run(*args, **kwargs):
         return MagicMock(returncode=0)
 
-    with patch("src.services.downloader.subprocess.run", side_effect=fake_run):
+    with patch("src.services.media_io.subprocess.run", side_effect=fake_run):
         assert d._extract_photo_frame(DownloadResult(success=True, file_path=str(v))) is None
 
 
@@ -948,7 +954,7 @@ def test_extract_photo_frame_success(tmp_path):
         out_path.write_bytes(b"x" * 5000)
         return proc
 
-    with patch("src.services.downloader.subprocess.run", side_effect=fake_run):
+    with patch("src.services.media_io.subprocess.run", side_effect=fake_run):
         result = d._extract_photo_frame(DownloadResult(success=True, file_path=str(v)))
     assert result is not None
     assert result.is_photo is True
@@ -965,8 +971,8 @@ def test_extract_photo_frame_success_remove_video_fails(tmp_path):
         out_path.write_bytes(b"x" * 5000)
         return MagicMock(returncode=0)
 
-    with patch("src.services.downloader.subprocess.run", side_effect=fake_run):
-        with patch("src.services.downloader.os.remove", side_effect=OSError("nope")):
+    with patch("src.services.media_io.subprocess.run", side_effect=fake_run):
+        with patch("src.services.media_io.os.remove", side_effect=OSError("nope")):
             result = d._extract_photo_frame(DownloadResult(success=True, file_path=str(v)))
     assert result is not None
 
@@ -978,7 +984,7 @@ def test_extract_photo_frame_timeout(tmp_path):
     d.has_ffmpeg = True
     v = fake_file(tmp_path, "v.mp4")
     with patch(
-        "src.services.downloader.subprocess.run",
+        "src.services.media_io.subprocess.run",
         side_effect=_sp.TimeoutExpired(cmd="ffmpeg", timeout=30),
     ):
         assert d._extract_photo_frame(DownloadResult(success=True, file_path=str(v))) is None
@@ -1214,7 +1220,7 @@ async def test_instagram_no_formats_has_structured_error_without_exact_product(t
     d = make_d(tmp_path)
     with (
         patch.object(d, "_try_instagram_photo", return_value=None) as photo_probe,
-        patch("src.services.downloader.yt_dlp.YoutubeDL") as ydl_class,
+        patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as ydl_class,
     ):
         ydl = MagicMock()
         ydl_class.return_value.__enter__.return_value = ydl
@@ -1297,7 +1303,7 @@ async def test_download_exception_in_executor(tmp_path):
 async def test_download_sync_no_info(tmp_path):
     d = make_d(tmp_path)
     url = "https://youtube.com/watch?v=noinfo"
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = None
@@ -1309,7 +1315,7 @@ async def test_download_sync_no_info(tmp_path):
 async def test_download_sync_playlist_no_entries(tmp_path):
     d = make_d(tmp_path)
     url = "https://youtube.com/watch?v=emptylist"
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {"entries": [None, None]}
@@ -1322,7 +1328,7 @@ async def test_download_sync_playlist_with_entries(tmp_path):
     d = make_d(tmp_path)
     video = fake_file(tmp_path, "v.mp4")
     url = "https://youtube.com/watch?v=list"
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {
@@ -1360,7 +1366,7 @@ async def test_download_sync_prepare_filename_raises(tmp_path):
         def prepare_filename(self, info):
             raise RuntimeError("can't prepare")
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL):
         # We can't easily inject file_id, so just ensure exception path is reached
         with patch("uuid.uuid4", return_value=MagicMock(__str__=lambda s: file_id + "00")):
             await d.download(url)
@@ -1399,7 +1405,7 @@ async def test_download_sync_unfound_file_via_find(tmp_path):
         return {"outtmpl": str(tmp_path / f"{file_id}.%(ext)s"), "format": "best"}
 
     with patch.object(d, "_get_ydl_opts", side_effect=fake_opts):
-        with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+        with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL):
             result = await d.download(url)
     assert result.success
     assert result.file_path == str(video)
@@ -1431,7 +1437,7 @@ async def test_download_sync_no_file_found_at_all(tmp_path):
         return {"outtmpl": str(tmp_path / "missing.%(ext)s"), "format": "best"}
 
     with patch.object(d, "_get_ydl_opts", side_effect=fake_opts):
-        with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+        with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL):
             result = await d.download(url)
     assert not result.success
 
@@ -1468,7 +1474,7 @@ async def test_download_sync_outtmpl_dict_form(tmp_path):
         }
 
     with patch.object(d, "_get_ydl_opts", side_effect=fake_opts):
-        with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+        with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL):
             result = await d.download(url)
     assert result.success
 
@@ -1482,7 +1488,7 @@ async def test_download_handles_ffmpeg_required_error(tmp_path):
 
     d = make_d(tmp_path)
     url = "https://youtube.com/watch?v=ffmpeg"
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = DownloadError("ffmpeg is not installed")
@@ -1497,7 +1503,7 @@ async def test_download_handles_sign_in_error(tmp_path):
 
     d = make_d(tmp_path)
     url = "https://youtube.com/watch?v=signin"
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = DownloadError("Sign in to view")
@@ -1511,7 +1517,7 @@ async def test_download_handles_generic_error(tmp_path):
 
     d = make_d(tmp_path)
     url = "https://youtube.com/watch?v=other"
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = DownloadError("some other error")
@@ -1523,7 +1529,7 @@ async def test_download_handles_generic_error(tmp_path):
 async def test_download_handles_unexpected_exception(tmp_path):
     d = make_d(tmp_path)
     url = "https://youtube.com/watch?v=oops"
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = RuntimeError("totally unexpected")
@@ -1551,7 +1557,7 @@ async def test_download_retries_via_kkinstagram(tmp_path):
             return {"title": "T", "duration": 5}
         raise DownloadError("login_required")
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = fake_extract
@@ -1570,7 +1576,7 @@ async def test_download_kkinstagram_fallback_also_fails(tmp_path):
     d = make_d(tmp_path)
     url = "https://www.instagram.com/reel/abc_login/"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = DownloadError("login_required")
@@ -1595,7 +1601,7 @@ async def test_kkinstagram_photo_uses_explicit_no_video_fallback(tmp_path):
 
     with (
         patch.object(d, "_try_instagram_photo", return_value=candidate),
-        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+        patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls,
     ):
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
@@ -1647,7 +1653,7 @@ def test_clear_cache_handles_os_remove_failure(tmp_path):
     d = make_d(tmp_path)
     p1 = fake_file(tmp_path, "p1.jpg")
     d.cache["h"] = {"file_path": str(p1), "photo_paths": [str(p1)], "is_photo": True}
-    with patch("src.services.downloader.os.remove", side_effect=OSError("nope")):
+    with patch("src.services.media_io.os.remove", side_effect=OSError("nope")):
         d.clear_cache()
 
 
@@ -1716,8 +1722,8 @@ def test_download_image_sync_max_filesize_remove_fails(tmp_path):
     fake.read = MagicMock(side_effect=[big, b""])
     fake.__enter__ = MagicMock(return_value=fake)
     fake.__exit__ = MagicMock(return_value=False)
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
-        with patch("src.services.downloader.os.remove", side_effect=OSError("nope")):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
+        with patch("src.services.media_io.os.remove", side_effect=OSError("nope")):
             out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
     assert out is None
 
@@ -1730,8 +1736,8 @@ def test_download_image_sync_tiny_remove_fails(tmp_path):
     fake.read = MagicMock(side_effect=[body, b""])
     fake.__enter__ = MagicMock(return_value=fake)
     fake.__exit__ = MagicMock(return_value=False)
-    with patch("src.services.downloader.urllib.request.urlopen", return_value=fake):
-        with patch("src.services.downloader.os.remove", side_effect=OSError("nope")):
+    with patch("src.services.instagram.urllib.request.urlopen", return_value=fake):
+        with patch("src.services.media_io.os.remove", side_effect=OSError("nope")):
             out = d._download_image_sync("https://cdn/img", str(tmp_path / "out"))
     assert out is None
 
@@ -1762,7 +1768,7 @@ async def test_download_sync_outtmpl_empty(tmp_path):
         return {"outtmpl": "", "format": "best"}
 
     with patch.object(d, "_get_ydl_opts", side_effect=fake_opts):
-        with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+        with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL):
             result = await d.download(url)
     assert not result.success
 
@@ -1784,7 +1790,7 @@ async def test_download_cookie_retry_then_fails(tmp_path):
             raise DownloadError("does not look like a netscape format cookies file")
         raise DownloadError("Video unavailable")
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = fake_extract
@@ -1822,6 +1828,7 @@ def test_download_sync_uses_writable_cookie_snapshot_and_cleans_it(tmp_path):
             snapshot = Path(self.opts["cookiefile"])
             seen_snapshot.append(snapshot)
             assert snapshot != source
+            assert snapshot.parent.resolve() == d.download_dir.resolve()
             assert snapshot.read_bytes() == original
             if os.name != "nt":
                 assert snapshot.stat().st_mode & 0o777 == 0o600
@@ -1843,7 +1850,7 @@ def test_download_sync_uses_writable_cookie_snapshot_and_cleans_it(tmp_path):
         "cookiefile": str(source),
         "outtmpl": str(tmp_path / "cookie-output_%(id)s.%(ext)s"),
     }
-    with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL):
         result = d._download_sync("https://www.instagram.com/reel/test/", opts)
 
     assert result.success
@@ -1947,7 +1954,7 @@ def test_invalid_cookie_is_not_restored_for_kkinstagram_retry(tmp_path):
         "cookiefile": str(source),
         "outtmpl": str(tmp_path / "mirror-output_%(id)s.%(ext)s"),
     }
-    with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL):
         result = d._download_sync("https://www.instagram.com/reel/test/", opts)
 
     assert result.success
@@ -2012,7 +2019,7 @@ async def test_download_sync_outtmpl_dict_in_else_branch(tmp_path):
         }
 
     with patch.object(d, "_get_ydl_opts", side_effect=fake_opts):
-        with patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL):
+        with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL):
             result = await d.download(url)
     # _find_downloaded_file will scan and find the file via prefix
     assert result.success

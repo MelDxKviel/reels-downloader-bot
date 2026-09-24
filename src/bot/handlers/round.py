@@ -83,28 +83,35 @@ async def _convert_to_round(input_path: str) -> Optional[str]:
         output_path,
     ]
 
+    keep_output = False
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.wait_for(proc.wait(), timeout=120)
-    except asyncio.TimeoutError:
         try:
-            proc.kill()
-        except Exception:
-            pass
-        return None
+            await asyncio.wait_for(proc.wait(), timeout=120)
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            await proc.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return None
 
-    if proc.returncode == 0 and os.path.exists(output_path):
-        return output_path
-    if os.path.exists(output_path):
-        try:
-            os.remove(output_path)
-        except Exception:
-            pass
-    return None
+        if proc.returncode == 0 and os.path.exists(output_path):
+            keep_output = True
+            return output_path
+        return None
+    finally:
+        if not keep_output and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
 
 
 async def _send_round(
@@ -119,7 +126,9 @@ async def _send_round(
     """Конвертирует файл и отправляет как video note."""
     await status_msg.edit_text(t("round.convert_status"))
 
-    round_path = await _convert_to_round(file_path)
+    round_path = await downloader.run_conversion(
+        message.from_user.id, lambda: _convert_to_round(file_path)
+    )
 
     if round_path is None:
         await status_msg.edit_text(t("round.convert_error"))
@@ -162,7 +171,7 @@ async def _download_and_send_round(
     try:
         # allow_carousel=False: для конвертации нужен реальный видеофайл, а не
         # фото-слайды карусели (их file_path указывал бы на JPG).
-        result = await downloader.download(url, allow_carousel=False)
+        result = await downloader.download(url, allow_carousel=False, user_id=message.from_user.id)
     except Exception as e:
         logger.error("Ошибка скачивания: %s", e, exc_info=True)
         await status_msg.edit_text(t("round.download_error"))
@@ -171,15 +180,19 @@ async def _download_and_send_round(
         )
         return
 
-    if not result.success or not result.file_path:
-        reason = html.escape(translate_download_error(t, result))
-        await status_msg.edit_text(t("round.failed", reason=reason))
-        await db.record_download(
-            user_id=message.from_user.id, platform=platform, url=url, success=False
-        )
-        return
+    try:
+        if not result.success or not result.file_path:
+            reason = html.escape(translate_download_error(t, result))
+            await status_msg.edit_text(t("round.failed", reason=reason))
+            await db.record_download(
+                user_id=message.from_user.id, platform=platform, url=url, success=False
+            )
+            return
 
-    await _send_round(message, db, status_msg, result.file_path, platform, url, t)
+        await _send_round(message, db, status_msg, result.file_path, platform, url, t)
+    finally:
+        if not result.from_cache:
+            downloader.discard_result_files(result)
 
 
 @router.message(Command("round"))
@@ -218,12 +231,16 @@ async def cancel_round(callback: CallbackQuery, state: FSMContext, t: Translator
     if callback.from_user.id != owner_id:
         await callback.answer(t("common.not_your_operation"), show_alert=True)
         return
+    data = await state.get_data()
+    if callback.message is None or data.get("prompt_message_id") != callback.message.message_id:
+        await callback.answer(t("common.stale_prompt"))
+        return
     await state.clear()
     await callback.message.edit_text(t("round.cancelled"))
     await callback.answer()
 
 
-@router.message(RoundStates.waiting_for_input, F.text)
+@router.message(RoundStates.waiting_for_input, F.text, ~F.text.startswith("/"))
 async def round_got_url(
     message: Message, state: FSMContext, db: DatabaseService, t: Translator
 ) -> None:

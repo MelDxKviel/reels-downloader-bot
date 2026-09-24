@@ -17,7 +17,7 @@ from aiogram.types import (
     Message,
 )
 
-from src.bot.handlers.download import _send_photo_paths
+from src.bot.handlers.download import _send_carousel_files, _send_photo_paths
 from src.bot.rich_carousel import send_rich_carousel
 from src.bot.telegram_retry import (
     TELEGRAM_UPLOAD_TIMEOUT,
@@ -62,7 +62,9 @@ async def _download_and_send(
     await status_msg.edit_text(t("download.start_status", platform=platform))
 
     try:
-        result: DownloadResult = await downloader.download(url)
+        result: DownloadResult = await downloader.download(
+            url, user_id=message.from_user.id, reserve=True
+        )
     except Exception as e:
         logger.error("Ошибка скачивания: %s", e, exc_info=True)
         await status_msg.edit_text(t("download.generic_error"))
@@ -71,71 +73,77 @@ async def _download_and_send(
         )
         return
 
-    if not result.success:
-        reason = html.escape(translate_download_error(t, result))
-        await status_msg.edit_text(t("download.failed", reason=reason))
-        await db.record_download(
-            user_id=message.from_user.id, platform=platform, url=url, success=False
-        )
-        return
-
-    slides = result.carousel_slides if isinstance(result.carousel_slides, list) else None
-    if slides and len(slides) >= 2:
-        media_label = t("download.media_label.carousel")
-    elif result.is_photo:
-        media_label = t("download.media_label.photo")
-    else:
-        media_label = t("download.media_label.video")
-    if result.from_cache:
-        await status_msg.edit_text(t("download.from_cache_status", media_label=media_label))
-    else:
-        await status_msg.edit_text(t("download.send_status", media_label=media_label))
-
     try:
-        sent_as_carousel = False
-        if slides and len(slides) >= 2 and message.bot is not None:
-            sent_as_carousel = await send_rich_carousel(
-                message.bot,
-                message.chat.id,
-                slides,
-                result.title,
-                media_paths=result.photo_paths if result.is_photo else None,
+        if not result.success:
+            reason = html.escape(translate_download_error(t, result))
+            await status_msg.edit_text(t("download.failed", reason=reason))
+            await db.record_download(
+                user_id=message.from_user.id, platform=platform, url=url, success=False
+            )
+            return
+
+        slides = result.carousel_slides if isinstance(result.carousel_slides, list) else None
+        if slides and len(slides) >= 2:
+            media_label = t("download.media_label.carousel")
+        elif result.is_photo:
+            media_label = t("download.media_label.photo")
+        else:
+            media_label = t("download.media_label.video")
+        if result.from_cache:
+            await status_msg.edit_text(t("download.from_cache_status", media_label=media_label))
+        else:
+            await status_msg.edit_text(t("download.send_status", media_label=media_label))
+
+        try:
+            sent_as_carousel = False
+            if slides and len(slides) >= 2 and message.bot is not None:
+                sent_as_carousel = await send_rich_carousel(
+                    message.bot,
+                    message.chat.id,
+                    slides,
+                    result.title,
+                    media_paths=result.photo_paths if result.is_photo else None,
+                )
+
+            if not sent_as_carousel and slides and len(slides) >= 2:
+                sent_as_carousel = await _send_carousel_files(message, slides)
+            if not sent_as_carousel and result.is_photo:
+                photo_paths = result.photo_paths or [result.file_path]
+                await _send_photo_paths(message, photo_paths)
+            elif not sent_as_carousel:
+                sent = await retry_transient_telegram(
+                    lambda: message.bot.send_video(
+                        chat_id=message.chat.id,
+                        video=FSInputFile(result.file_path),
+                        duration=telegram_duration(result.duration),
+                        width=result.width,
+                        height=result.height,
+                        supports_streaming=True,
+                        request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                    ),
+                    "sendVideo(user)",
+                )
+                if sent.video and sent.video.file_id:
+                    downloader.set_telegram_file_id(url, sent.video.file_id)
+            await status_msg.delete()
+            await db.record_download(
+                user_id=message.from_user.id, platform=platform, url=url, success=True
+            )
+            logger.info(
+                "✅ %s отправлено (пользователь: %s, из кэша: %s)",
+                media_label.capitalize(),
+                message.from_user.id,
+                result.from_cache,
+            )
+        except Exception as e:
+            logger.error("Ошибка при отправке: %s", e, exc_info=True)
+            await status_msg.edit_text(t("download.send_error"))
+            await db.record_download(
+                user_id=message.from_user.id, platform=platform, url=url, success=False
             )
 
-        if not sent_as_carousel and result.is_photo:
-            photo_paths = result.photo_paths or [result.file_path]
-            await _send_photo_paths(message, photo_paths)
-        elif not sent_as_carousel:
-            sent = await retry_transient_telegram(
-                lambda: message.bot.send_video(
-                    chat_id=message.chat.id,
-                    video=FSInputFile(result.file_path),
-                    duration=telegram_duration(result.duration),
-                    width=result.width,
-                    height=result.height,
-                    supports_streaming=True,
-                    request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
-                ),
-                "sendVideo(user)",
-            )
-            if sent.video and sent.video.file_id:
-                downloader.set_telegram_file_id(url, sent.video.file_id)
-        await status_msg.delete()
-        await db.record_download(
-            user_id=message.from_user.id, platform=platform, url=url, success=True
-        )
-        logger.info(
-            "✅ %s отправлено (пользователь: %s, из кэша: %s)",
-            media_label.capitalize(),
-            message.from_user.id,
-            result.from_cache,
-        )
-    except Exception as e:
-        logger.error("Ошибка при отправке: %s", e, exc_info=True)
-        await status_msg.edit_text(t("download.send_error"))
-        await db.record_download(
-            user_id=message.from_user.id, platform=platform, url=url, success=False
-        )
+    finally:
+        downloader.release_result(result)
 
 
 @router.message(Command("download"))
@@ -164,16 +172,24 @@ async def cmd_download(
 
 @router.callback_query(F.data.startswith("cancel_download:"))
 async def cancel_download(callback: CallbackQuery, state: FSMContext, t: Translator) -> None:
-    owner_id = int(callback.data.split(":")[1])
+    try:
+        owner_id = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
     if callback.from_user.id != owner_id:
         await callback.answer(t("common.not_your_operation"), show_alert=True)
+        return
+    data = await state.get_data()
+    if callback.message is None or data.get("prompt_message_id") != callback.message.message_id:
+        await callback.answer(t("common.stale_prompt"))
         return
     await state.clear()
     await callback.message.edit_text(t("download.cmd.cancelled"))
     await callback.answer()
 
 
-@router.message(DownloadStates.waiting_for_url, F.text)
+@router.message(DownloadStates.waiting_for_url, F.text, ~F.text.startswith("/"))
 async def download_got_url(
     message: Message, state: FSMContext, db: DatabaseService, t: Translator
 ) -> None:

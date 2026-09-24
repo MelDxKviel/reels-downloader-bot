@@ -189,5 +189,10 @@
   "downloader.error.unexpected": "Неожиданная ошибка: {message}",
   "downloader.error.download_exception": "Ошибка при скачивании: {message}",
   "downloader.error.instagram_photo_no_media": "Не удалось скачать фото из Instagram. Instagram закрыл доступ к фото без авторизации. Для загрузки настройте INSTA_COOKIES_FILE.",
-  "downloader.error.instagram_no_formats": "Instagram не вернул доступное медиа. Попробуйте ещё раз или обновите Instagram cookies."
+  "downloader.error.instagram_no_formats": "Instagram не вернул доступное медиа. Попробуйте ещё раз или обновите Instagram cookies.",
+  "common.stale_prompt": "Это действие уже не активно.",
+  "downloader.error.busy": "Слишком много задач. Дождитесь завершения текущей загрузки и попробуйте снова.",
+  "downloader.error.timeout": "Превышено время загрузки. Попробуйте ещё раз или выберите более короткое видео.",
+  "downloader.error.worker_failed": "Не удалось завершить загрузку. Попробуйте ещё раз.",
+  "downloader.error.single_video_required": "Пришлите ссылку на отдельное видео, а не на канал или плейлист."
 }

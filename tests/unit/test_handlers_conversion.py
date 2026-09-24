@@ -4,6 +4,7 @@ These handlers share an almost identical structure: FFmpeg conversion,
 URL/file FSM flow, cancel callback. Tests are parameterized where possible.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +19,11 @@ from src.services.i18n import Translator
 from ._helpers import make_callback, make_db, make_message, make_state, make_status_message
 
 # ── _convert_to_* FFmpeg wrappers ───────────────────────────────────────────
+
+
+async def _timeout_wait_for(waiter, timeout):
+    waiter.close()
+    raise asyncio.TimeoutError
 
 
 @pytest.mark.parametrize(
@@ -117,8 +123,6 @@ async def test_convert_failure_returncode(tmp_path, module, fn):
 )
 @pytest.mark.asyncio
 async def test_convert_timeout(tmp_path, module, fn):
-    import asyncio
-
     mod_name = module.__name__.rsplit(".", 1)[1]
     proc = MagicMock()
     proc.returncode = 0
@@ -136,7 +140,7 @@ async def test_convert_timeout(tmp_path, module, fn):
             ):
                 with patch(
                     f"src.bot.handlers.{mod_name}.asyncio.wait_for",
-                    side_effect=asyncio.TimeoutError(),
+                    side_effect=_timeout_wait_for,
                 ):
                     result = await getattr(module, fn)("input.mp4")
     assert result is None
@@ -153,8 +157,6 @@ async def test_convert_timeout(tmp_path, module, fn):
 )
 @pytest.mark.asyncio
 async def test_convert_timeout_kill_exception(tmp_path, module, fn):
-    import asyncio
-
     mod_name = module.__name__.rsplit(".", 1)[1]
     proc = MagicMock()
     proc.returncode = 0
@@ -172,7 +174,7 @@ async def test_convert_timeout_kill_exception(tmp_path, module, fn):
             ):
                 with patch(
                     f"src.bot.handlers.{mod_name}.asyncio.wait_for",
-                    side_effect=asyncio.TimeoutError(),
+                    side_effect=_timeout_wait_for,
                 ):
                     result = await getattr(module, fn)("input.mp4")
     assert result is None
@@ -432,7 +434,8 @@ async def test_cancel_wrong_owner(module, cancel_fn, prefix):
 @pytest.mark.asyncio
 async def test_cancel_success(module, cancel_fn, prefix):
     cb = make_callback(f"{prefix}:1", user_id=1)
-    state = make_state()
+    cb.message.message_id = 99
+    state = make_state({"prompt_message_id": 99})
     await getattr(module, cancel_fn)(cb, state, Translator("en"))
     state.clear.assert_awaited()
 

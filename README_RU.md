@@ -79,6 +79,10 @@ DOWNLOAD_DIR=downloads                   # Директория для загр�
 YT_COOKIES_FILE=./cookies/youtube.txt    # Cookies для YouTube 18+
 INSTA_COOKIES_FILE=./cookies/instagram.txt  # Cookies для Instagram (закрытые аккаунты)
 VIDEO_STORAGE_CHAT_ID=-1001234567890     # Чат для inline-pre-upload видео (fallback: первый ADMIN_USERS)
+DOWNLOAD_TIMEOUT=300                    # Таймаут загрузки, секунды
+MAX_CONCURRENT_JOBS=3                   # Одновременные загрузки, конвертации и поиск
+MAX_QUEUED_JOBS=12                      # Дополнительные задачи в очереди
+MAX_USER_JOBS=2                         # Выполняемые + ожидающие задачи одного пользователя
 
 # Только для Docker Compose
 YT_COOKIES_FILE_HOST_PATH=./cookies/youtube.txt     # Путь к YouTube cookies на хосте
@@ -98,6 +102,17 @@ INSTA_COOKIES_FILE_HOST_PATH=./cookies/instagram.txt  # Путь к Instagram co
 | `YT_COOKIES_FILE` | ❌ | Путь к Netscape cookies-файлу для YouTube |
 | `INSTA_COOKIES_FILE` | ❌ | Путь к Netscape cookies-файлу для Instagram |
 | `VIDEO_STORAGE_CHAT_ID` | ❌ | Чат для промежуточной выгрузки видео в inline-режиме ради получения `file_id`. Если не задан — используется первый ID из `ADMIN_USERS` |
+| `DOWNLOAD_TIMEOUT` | ❌ | Таймаут загрузки в секундах (по умолчанию `300`) |
+| `MAX_CONCURRENT_JOBS` | ❌ | Максимум одновременных загрузок, конвертаций и поисковых запросов (по умолчанию `3`) |
+| `MAX_QUEUED_JOBS` | ❌ | Максимум ожидающих задач сверх выполняемых (по умолчанию `12`) |
+| `MAX_USER_JOBS` | ❌ | Максимум выполняемых и ожидающих задач одного пользователя (по умолчанию `2`) |
+| `GIF_FPS` | ❌ | Частота кадров анимации (по умолчанию `30`) |
+| `GIF_MAX_DURATION` | ❌ | Максимальная длительность анимации в секундах (по умолчанию `15`) |
+| `GIF_MAX_SIZE` | ❌ | Максимальная длинная сторона анимации в пикселях (по умолчанию `640`) |
+| `GIF_CRF` | ❌ | Качество H.264: ниже — качественнее и больше файл (по умолчанию `28`) |
+| `CACHE_AUTOCLEAN_DEFAULT` | ❌ | Автоочистка кэша до изменения настройки через `/cache` (по умолчанию `false`) |
+| `CACHE_MAX_AGE_HOURS` | ❌ | Срок хранения кэша до изменения через `/cache`, часы (по умолчанию `168`, семь дней) |
+| `CACHE_CLEANUP_INTERVAL` | ❌ | Интервал проверки кэша в секундах (по умолчанию `3600`, минимум `60`) |
 | `YT_COOKIES_FILE_HOST_PATH` | Docker | Путь к YouTube cookies на хосте (монтируется в контейнер) |
 | `INSTA_COOKIES_FILE_HOST_PATH` | Docker | Путь к Instagram cookies на хосте (монтируется в контейнер) |
 
@@ -142,6 +157,12 @@ docker compose down
 - `db` — PostgreSQL 17 Alpine с health check
 - Данные БД сохраняются в volume `postgres_data`
 - Скачанные файлы монтируются в `./downloads/`
+
+Оба Compose-файла передают в контейнер значения `DEFAULT_LANGUAGE`, `VIDEO_STORAGE_CHAT_ID`,
+`GIF_*`, `CACHE_*`, `DOWNLOAD_TIMEOUT` и трёх лимитов `MAX_*_JOBS` из `.env`. После изменения
+выполни `docker compose up -d bot` (для локальной сборки добавь `-f docker-compose.local.yml`).
+Параметры автоочистки, уже сохранённые через `/cache`, имеют приоритет над начальными
+значениями из окружения.
 
 ---
 

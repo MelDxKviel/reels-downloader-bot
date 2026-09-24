@@ -15,7 +15,11 @@ from aiogram.types import (
     InputRichMessageMedia,
 )
 
-from src.bot.telegram_retry import TELEGRAM_UPLOAD_TIMEOUT, retry_transient_telegram
+from src.bot.telegram_retry import (
+    TELEGRAM_UPLOAD_TIMEOUT,
+    retry_transient_telegram,
+    telegram_duration,
+)
 from src.services.downloader import CarouselSlide
 
 logger = logging.getLogger(__name__)
@@ -68,7 +72,13 @@ def _attached_media_rich_message(
     attachments: list[InputRichMessageMedia] = []
     for slide, media_value, media_id in zip(slides, media_values, media_ids, strict=True):
         if slide.is_video:
-            media = InputMediaVideo(media=media_value, supports_streaming=True)
+            media = InputMediaVideo(
+                media=media_value,
+                supports_streaming=True,
+                width=slide.width,
+                height=slide.height,
+                duration=telegram_duration(slide.duration),
+            )
         else:
             media = InputMediaPhoto(media=media_value)
         attachments.append(InputRichMessageMedia(id=media_id, media=media))
@@ -93,17 +103,17 @@ def rich_carousel_variants(
 
     variants: list[InputRichMessage] = []
     media_values: Sequence[FSInputFile | str] | None = media_file_ids
-    if (
-        media_paths is not None
-        and len(media_paths) == len(slides)
-        and not any(slide.is_video for slide in slides)
-    ):
+    local_paths = [slide.local_path for slide in slides]
+    if media_file_ids is None and all(local_paths):
+        media_paths = local_paths
+    if media_paths is not None and len(media_paths) == len(slides):
         if all(isinstance(path, str) and os.path.isfile(path) for path in media_paths):
             media_values = [FSInputFile(path) for path in media_paths]
     attached_variant = _attached_media_rich_message(slides, caption, media_values)
     if attached_variant is not None:
         variants.append(attached_variant)
-    variants.append(InputRichMessage(html=build_slideshow_html(slides, caption)))
+    if all(slide.url for slide in slides):
+        variants.append(InputRichMessage(html=build_slideshow_html(slides, caption)))
     return variants
 
 

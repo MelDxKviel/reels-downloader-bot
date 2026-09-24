@@ -39,8 +39,19 @@ DOWNLOAD_DIR: str = os.getenv("DOWNLOAD_DIR", "downloads")
 # Максимальный размер файла для отправки через Telegram (50MB)
 MAX_FILE_SIZE: int = 50 * 1024 * 1024  # 50MB в байтах
 
+
 # Максимальное время ожидания скачивания (секунды)
-DOWNLOAD_TIMEOUT: int = 300  # 5 минут
+def _positive_int_env(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+DOWNLOAD_TIMEOUT: int = _positive_int_env("DOWNLOAD_TIMEOUT", 300)
+MAX_CONCURRENT_JOBS: int = _positive_int_env("MAX_CONCURRENT_JOBS", 3)
+MAX_QUEUED_JOBS: int = _positive_int_env("MAX_QUEUED_JOBS", 12, minimum=0)
+MAX_USER_JOBS: int = _positive_int_env("MAX_USER_JOBS", 2)
 
 # Путь к файлу cookies для YouTube (для видео 18+)
 # Экспортируйте cookies из браузера с помощью расширения "Get cookies.txt LOCALLY"

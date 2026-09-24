@@ -177,7 +177,7 @@ async def test_cache_cleanup_loop_swallows_errors_and_continues():
 
 
 def test_run_invokes_asyncio_run():
-    with patch("src.main.asyncio.run") as mock_run:
+    with patch("src.main.asyncio.run", side_effect=lambda coroutine: coroutine.close()) as mock_run:
         main_mod.run()
     mock_run.assert_called_once()
 
@@ -186,5 +186,5 @@ def test_module_run_as_script():
     """Cover the `if __name__ == '__main__':` entrypoint."""
     import runpy
 
-    with patch("src.main.asyncio.run"):
-        runpy.run_module("src.main", run_name="__main__")
+    with patch("src.main.asyncio.run", side_effect=lambda coroutine: coroutine.close()):
+        runpy.run_path(main_mod.__file__, run_name="__main__")

@@ -13,6 +13,11 @@ dependencies = [
     "alembic>=1.13.0",
 ]
 
+[project.optional-dependencies]
+# Транспорт для scripts/sync_cookies.py при SSH-входе по паролю.
+# Не входит в рантайм бота (Docker-образ ставит зависимости с --no-dev и без extras).
+ssh = ["paramiko>=3.0.0"]
+
 [project.scripts]
 downloader-bot = "src.main:run"
 

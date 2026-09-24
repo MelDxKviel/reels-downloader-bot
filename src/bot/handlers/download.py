@@ -11,6 +11,7 @@ from aiogram.types import (
     FSInputFile,
     InputMediaDocument,
     InputMediaPhoto,
+    InputMediaVideo,
     Message,
 )
 
@@ -21,7 +22,7 @@ from src.bot.telegram_retry import (
     telegram_duration,
 )
 from src.services.database import DatabaseService
-from src.services.downloader import DownloadResult, downloader
+from src.services.downloader import CarouselSlide, DownloadResult, downloader
 from src.services.i18n import Translator, translate_download_error
 from src.services.url_utils import extract_url
 
@@ -80,6 +81,53 @@ async def _send_photo_paths(
             await _send_photo_paths(message, chunk, as_documents=True)
 
 
+async def _send_carousel_files(message: Message, slides: list[CarouselSlide]) -> bool:
+    """Keep every ordered local slide when rich messages are unavailable."""
+    if not all(slide.local_path for slide in slides):
+        return False
+    for start in range(0, len(slides), _TELEGRAM_MEDIA_GROUP_MAX):
+        chunk = slides[start : start + _TELEGRAM_MEDIA_GROUP_MAX]
+        if not any(slide.is_video for slide in chunk):
+            await _send_photo_paths(message, [slide.local_path for slide in chunk])
+            continue
+        media = [
+            InputMediaVideo(
+                media=FSInputFile(slide.local_path),
+                width=slide.width,
+                height=slide.height,
+                duration=telegram_duration(slide.duration),
+                supports_streaming=True,
+            )
+            if slide.is_video
+            else InputMediaPhoto(media=FSInputFile(slide.local_path))
+            for slide in chunk
+        ]
+        if len(media) > 1:
+            await retry_transient_telegram(
+                lambda: message.bot.send_media_group(
+                    chat_id=message.chat.id,
+                    media=media,
+                    message_thread_id=message.message_thread_id,
+                    request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                ),
+                "sendMediaGroup(carousel fallback)",
+            )
+        else:
+            slide = chunk[0]
+            await retry_transient_telegram(
+                lambda: message.answer_video(
+                    video=FSInputFile(slide.local_path),
+                    width=slide.width,
+                    height=slide.height,
+                    duration=telegram_duration(slide.duration),
+                    supports_streaming=True,
+                    request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                ),
+                "sendVideo(carousel fallback)",
+            )
+    return True
+
+
 @router.message(F.text)
 async def handle_url(message: Message, db: DatabaseService, t: Translator) -> None:
     """Обработчик текстовых сообщений с URL."""
@@ -104,13 +152,19 @@ async def handle_url(message: Message, db: DatabaseService, t: Translator) -> No
     # Отправляем сообщение о начале скачивания
     status_message = await message.answer(t("download.start_status", platform=platform))
 
+    result = None
     try:
-        # Скачиваем видео или фото
-        result: DownloadResult = await downloader.download(url)
+        # Reserve cached media until every Telegram upload finishes.
+        result: DownloadResult = await downloader.download(
+            url, user_id=message.from_user.id, reserve=True
+        )
 
         if not result.success:
             reason = html.escape(translate_download_error(t, result))
             await status_message.edit_text(t("download.failed", reason=reason))
+            await db.record_download(
+                user_id=message.from_user.id, platform=platform, url=url, success=False
+            )
             return
 
         is_carousel = bool(
@@ -147,6 +201,8 @@ async def handle_url(message: Message, db: DatabaseService, t: Translator) -> No
         # 2) Фолбэк, если карусель не собрана или Telegram не смог её отправить
         #    (старый Bot API сервер, недоступный URL): отдаём скачанные файлы —
         #    альбом/одиночное фото для фото-постов, иначе видео.
+        if not sent_as_carousel and slides and len(slides) >= 2:
+            sent_as_carousel = await _send_carousel_files(message, slides)
         if not sent_as_carousel:
             if result.is_photo:
                 photo_paths = result.photo_paths or [result.file_path]
@@ -188,3 +244,6 @@ async def handle_url(message: Message, db: DatabaseService, t: Translator) -> No
         await db.record_download(user_id=user.id, platform=platform, url=url, success=False)
 
         await status_message.edit_text(t("download.generic_error"))
+    finally:
+        if result is not None:
+            downloader.release_result(result)

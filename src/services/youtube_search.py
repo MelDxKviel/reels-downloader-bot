@@ -6,19 +6,20 @@
 ``extract_flat`` (без скачивания), мы фильтруем их по длительности до 60 секунд
 и возвращаем 3 наиболее свежих кандидата вместе с превью.
 
-Функция блокирующая, поэтому обёрнута в ``run_in_executor`` для использования
-из async-кода.
+Сетевой поиск выполняется в отдельном процессе с ограниченной очередью
+и общим таймаутом.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
 import yt_dlp
 
+from src.services.download_jobs import JobQueueFull, jobs
+from src.services.download_worker import run_search_worker
 from src.services.downloader import downloader
 
 logger = logging.getLogger(__name__)
@@ -129,14 +130,22 @@ def _search_shorts_sync(query: str, count: int) -> List[ShortsSearchResult]:
     return results
 
 
-async def search_shorts(query: str, count: int = 3) -> List[ShortsSearchResult]:
+async def search_shorts(
+    query: str, count: int = 3, *, user_id: int | None = None
+) -> List[ShortsSearchResult]:
     """Возвращает до ``count`` шортсов по поисковому запросу."""
     query = (query or "").strip()
     if len(query) < MIN_QUERY_LENGTH:
         return []
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: _search_shorts_sync(query, count))
+    try:
+        raw = await jobs.run(
+            user_id, lambda: run_search_worker(downloader.download_dir, query, count)
+        )
+        return [ShortsSearchResult(**item) for item in raw]
+    except (JobQueueFull, TimeoutError):
+        logger.info("Shorts search skipped: queue full or deadline exceeded")
+        return []
 
 
 def build_shorts_url(video_id: str) -> str:

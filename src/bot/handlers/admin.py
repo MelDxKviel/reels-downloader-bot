@@ -597,7 +597,7 @@ async def cb_userstats_view(
     await callback.answer()
 
 
-@router.message(AdminStates.waiting_for_user_id, F.text)
+@router.message(AdminStates.waiting_for_user_id, F.text, ~F.text.startswith("/"))
 async def admin_got_user_id(
     message: Message, state: FSMContext, db: DatabaseService, bot: Bot, t: Translator
 ) -> None:

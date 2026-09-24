@@ -14,8 +14,14 @@ from src.services.downloader import DownloadResult, VideoDownloader, _is_instagr
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
+async def _in_process_worker(service, url, allow_carousel):
+    # Source orchestration unit tests replace external backends in this process.
+    # Separate worker integration tests exercise production process isolation.
+    return await service._download_source(url, allow_carousel)
+
+
 def make_downloader(tmp_path: Path) -> VideoDownloader:
-    return VideoDownloader(str(tmp_path))
+    return VideoDownloader(str(tmp_path), worker_runner=_in_process_worker)
 
 
 def fake_video(tmp_path: Path, name: str = "video.mp4", size: int = 1024) -> Path:
@@ -364,7 +370,7 @@ def test_video_metadata_ffprobe_applies_rotation():
     )
     with (
         patch("src.services.downloader.shutil.which", return_value="ffprobe"),
-        patch("src.services.downloader.subprocess.run", return_value=probe),
+        patch("src.services.media_io.subprocess.run", return_value=probe),
     ):
         width, height, duration = VideoDownloader._video_metadata(
             {"width": 1920, "height": 1080}, "portrait.mp4"
@@ -382,7 +388,7 @@ def test_video_metadata_ffprobe_zero_rotation_overrides_stale_extractor_rotation
     )
     with (
         patch("src.services.downloader.shutil.which", return_value="ffprobe"),
-        patch("src.services.downloader.subprocess.run", return_value=probe),
+        patch("src.services.media_io.subprocess.run", return_value=probe),
     ):
         width, height, _duration = VideoDownloader._video_metadata(
             {"width": 1280, "height": 720, "rotation": 90}, "portrait.mp4"
@@ -398,7 +404,7 @@ async def test_download_rejects_unsupported_url(tmp_path):
     d = make_downloader(tmp_path)
     result = await d.download("https://example.com/video")
     assert not result.success
-    assert "не поддерживается" in result.error.lower() or "поддерживаемые" in result.error.lower()
+    assert result.error_code == "downloader.error.unsupported_url"
 
 
 # ── download: cache hit ───────────────────────────────────────────────────────
@@ -429,7 +435,7 @@ async def test_download_success_via_yt_dlp(tmp_path):
     video = fake_video(tmp_path, "downloaded.mp4")
     url = "https://youtube.com/watch?v=realvideo"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {"title": "My Video", "duration": 120.0}
@@ -449,7 +455,7 @@ async def test_download_caches_result_after_success(tmp_path):
     video = fake_video(tmp_path, "downloaded.mp4")
     url = "https://youtube.com/watch?v=newvideo"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {"title": "V", "duration": 10.0}
@@ -472,7 +478,7 @@ async def test_download_handles_unavailable_video(tmp_path):
     d = make_downloader(tmp_path)
     url = "https://youtube.com/watch?v=unavailable"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = DownloadError("Video unavailable")
@@ -490,7 +496,7 @@ async def test_download_handles_private_video(tmp_path):
     d = make_downloader(tmp_path)
     url = "https://youtube.com/watch?v=private"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = DownloadError("Private video")
@@ -510,7 +516,7 @@ async def test_download_handles_file_too_large(tmp_path):
     big_video = fake_video(tmp_path, "big.mp4", size=MAX_FILE_SIZE + 1)
     url = "https://youtube.com/watch?v=toobig"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {"title": "Big", "duration": 600.0}
@@ -519,7 +525,7 @@ async def test_download_handles_file_too_large(tmp_path):
         result = await d.download(url)
 
     assert not result.success
-    assert "большой" in result.error or "MB" in result.error
+    assert result.error_code == "downloader.error.file_too_large"
     assert not big_video.exists()  # file should be deleted
 
 
@@ -841,7 +847,7 @@ async def test_download_retries_without_cookies_on_invalid_cookiefile(tmp_path):
             raise DownloadError("does not look like a netscape format cookies file")
         return {"title": "Retried", "duration": 5.0}
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.side_effect = fake_extract
@@ -875,7 +881,7 @@ async def test_download_keeps_instagram_video_when_duration_missing_or_short(tmp
 
     with (
         patch.object(d, "_try_instagram_photo", return_value=None),
-        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+        patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls,
     ):
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
@@ -898,7 +904,7 @@ async def test_download_skips_photo_extraction_for_reel(tmp_path):
     video = fake_video(tmp_path, "reel.mp4")
     url = "https://www.instagram.com/reel/XYZ789/"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {"title": "Reel", "duration": 0.0}
@@ -919,7 +925,7 @@ async def test_download_skips_photo_extraction_when_duration_above_threshold(tmp
     video = fake_video(tmp_path, "longvideo.mp4")
     url = "https://www.instagram.com/p/VIDEO123/"
 
-    with patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls:
+    with patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls:
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {"title": "Long", "duration": 30.0}
@@ -944,7 +950,7 @@ async def test_download_twitter_image_via_prepare_filename(tmp_path):
 
     with (
         patch.object(d, "_fetch_twitter_media", return_value=None),
-        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+        patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls,
     ):
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl
@@ -986,7 +992,7 @@ async def test_download_twitter_image_via_progress_hook(tmp_path):
 
     with (
         patch.object(d, "_fetch_twitter_media", return_value=None),
-        patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL),
+        patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL),
     ):
         result = await d.download(url)
 
@@ -1024,7 +1030,7 @@ async def test_download_twitter_multi_image_returns_carousel(tmp_path):
 
     with (
         patch.object(d, "_fetch_twitter_media", return_value=None),
-        patch("src.services.downloader.yt_dlp.YoutubeDL", FakeYDL),
+        patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL", FakeYDL),
     ):
         result = await d.download(url)
 
@@ -1044,7 +1050,7 @@ async def test_download_twitter_video_not_treated_as_photo(tmp_path):
 
     with (
         patch.object(d, "_fetch_twitter_media", return_value=None),
-        patch("src.services.downloader.yt_dlp.YoutubeDL") as mock_cls,
+        patch("src.services.ytdlp_backend.yt_dlp.YoutubeDL") as mock_cls,
     ):
         mock_ydl = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_ydl

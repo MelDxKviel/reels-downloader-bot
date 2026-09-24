@@ -41,14 +41,16 @@ Schema is auto-created on startup via `Base.metadata.create_all()` — no migrat
    - `UserAccessMiddleware` — silently drops messages from non-admin, non-whitelisted users
    - `LocaleMiddleware` — resolves the user's language (DB preference → Telegram `language_code` → `DEFAULT_LANGUAGE`) and injects `lang: str` and `t: Translator` into handler `data`
 2. The update is routed through routers in priority order: `admin_router` → `language_router` → `common_router` → `download_cmd_router` → `mp3_router` → `voice_router` → `gif_router` → `round_router` → `download_router` → `inline_router`
-3. Download handlers call `VideoDownloader.download(url)`, which checks an in-memory/JSON cache before spawning yt-dlp in a thread executor (`loop.run_in_executor`)
+3. Download handlers call `VideoDownloader.download(url, user_id=..., reserve=True)`, which checks the synchronized cache before admitting an isolated download worker through a bounded queue
 4. Results are uploaded to Telegram; both successes and failures are recorded via `DatabaseService.record_download()`
 
 ### Key Design Decisions
 
 **Singleton downloader**: `VideoDownloader` is instantiated once at module level in `src/services/downloader.py` and shared across all handlers. Its in-memory cache dict is the single source of truth, backed by `downloads/cache.json` for persistence. The cache stores separate `video_file_id`, `photo_file_id`, and `mp3_file_id` entries for inline-mode reuse.
 
-**Sync-to-async bridge**: `yt-dlp` and FFmpeg are synchronous/subprocess-based. yt-dlp calls go through `asyncio.get_event_loop().run_in_executor(None, ...)`. FFmpeg uses `asyncio.create_subprocess_exec()`. Neither blocks the event loop.
+**Download execution and modules**: `downloader.py` is the public facade; models/constants live in `media.py`, cache persistence/leases in `download_cache.py`, cookie handling in `cookies.py`, platform extraction in `instagram.py` and `twitter.py`, media I/O in `media_io.py`, and yt-dlp in `ytdlp_backend.py`. The platform implementations remain available as facade methods for compatibility. Network downloads run in isolated worker processes (`download_worker.py`); a deadline stops the process tree before removing partial files. `download_jobs.py` bounds downloads, Shorts searches and FFmpeg conversions together, with one running job per user and configurable pending limits. FFmpeg conversion uses async subprocesses and reaps the process on timeout or cancellation.
+
+**File ownership**: Cached download callers use `download(..., reserve=True, user_id=...)` and `release_result(result)` in `finally`. Cache cleanup is synchronized with readers/writers and defers deletion of leased files; identical cached URL requests share one worker. Uncached conversions call `discard_result_files(result)` in `finally`. Carousel slides include their own `local_path`, dimensions and duration; cache serialization and cleanup include every slide, and video/photo inline slides are uploaded individually to obtain file IDs. Cache snapshots use an atomic replace.
 
 **Access tiers**: Admins are defined statically in `ADMIN_USERS` (env var). Regular users are rows in the `users` table with `is_active=True`. `UserAccessMiddleware` enforces both checks before any handler runs — handlers do not need to re-check access. Denied `CallbackQuery` events are acknowledged silently via `_terminate_callback()` to prevent the 30-second spinner.
 
@@ -64,7 +66,7 @@ Schema is auto-created on startup via `Base.metadata.create_all()` — no migrat
 
 **GIF output as silent mp4**: `/gif` does not emit a real palette-based `.gif`. Telegram renders a soundless H.264 mp4 as an autoplaying looped animation (`sendAnimation`), and that mp4 is far lighter and smoother than an equivalent GIF — sidestepping the GIF format's frames-vs-size tradeoff. `_convert_to_gif` caps the long side at `GIF_MAX_SIZE` (no upscale, even dimensions for yuv420p), the duration at `GIF_MAX_DURATION` and the frame rate at `GIF_FPS`, encoding with libx264 + CRF `GIF_CRF`. If a pass still exceeds `MAX_FILE_SIZE`, it re-encodes progressively smaller until it fits. The result is sent via `answer_animation`.
 
-**Inline mode**: The bot supports inline queries (`@bot <url>`). Results are returned as cached file_ids when available, or as placeholder Article results with a loading keyboard. On selection (`chosen_inline_result`), ordinary video/photo/MP3 is uploaded to `VIDEO_STORAGE_CHAT_ID` (falls back to `ADMIN_USERS[0]`) and the inline message is edited with the real media. A cached or newly downloaded carousel instead follows the rich-message file-ID flow described above and replaces the same placeholder with a complete slideshow. Inline answers, storage uploads, rich/media edits, and regular media delivery retry transient Telegram network/5xx failures (including 504) with short backoff; exhausted inline failures show only a localized “failed to load” message while technical details stay in server logs. Video width, height, and duration are passed to Telegram so portrait previews keep their aspect ratio. Non-cached inline source files are explicitly deleted after Telegram obtains reusable file IDs; cached carousel files remain owned by cache cleanup. The reply_markup (keyboard) must be present on the placeholder for Telegram to send `inline_message_id`. BotFather inline feedback must be set to 100% for `chosen_inline_result` to fire.
+**Inline mode**: The bot supports inline queries (`@bot <url>`). Results are returned as cached file_ids when available, or as placeholder Article results with a loading keyboard. On selection (`chosen_inline_result`), ordinary video/photo/MP3 is uploaded to `VIDEO_STORAGE_CHAT_ID` (falls back to `ADMIN_USERS[0]`) and the inline message is edited with the real media. A cached or newly downloaded carousel instead follows the rich-message file-ID flow described above and replaces the same placeholder with a complete slideshow. Inline answers, storage uploads, rich/media edits, and regular media delivery retry transient Telegram network/5xx failures (including 504) with short backoff; exhausted inline failures show only a localized “failed to load” message while technical details stay in server logs. Video width, height, and duration are passed to Telegram so portrait previews keep their aspect ratio. Inline media downloads are cached and reserved until delivery ends; MP3 source downloads remain temporary and are explicitly deleted. Cached carousel files remain owned by cache cleanup. The reply_markup (keyboard) must be present on the placeholder for Telegram to send `inline_message_id`. BotFather inline feedback must be set to 100% for `chosen_inline_result` to fire.
 
 **Cache management & auto-cleanup**: Cache administration is admin-only and lives in `admin.py` (gated by `is_admin`). `/cache` shows the entry count, on-disk size (`VideoDownloader.cache_disk_usage()`) and the auto-cleanup state, with inline buttons to clear the cache, toggle auto-cleanup, and cycle the retention window through `CACHE_MAX_AGE_PRESETS`. `/clearcache` wipes everything. The auto-cleanup toggle and retention (hours) are stored in `bot_settings` via `DatabaseService.get/set_cache_autoclean` and `get/set_cache_max_age_hours` (keys `cache.autoclean.enabled`, `cache.autoclean.max_age_hours`), so they survive restarts and apply without redeploy. A background task started in `main.py` (`_cache_cleanup_loop`) wakes every `CACHE_CLEANUP_INTERVAL` seconds, re-reads the DB setting, and — when enabled — calls `VideoDownloader.cleanup_expired(max_age_seconds)` in an executor. Each cache entry records a `cached_at` timestamp when written; `cleanup_expired` evicts entries (and deletes their files) older than the threshold, falling back to file mtime for legacy entries and skipping entries whose age can't be determined. The task is cancelled on graceful shutdown.
 
@@ -98,7 +100,17 @@ src/
 │   ├── en.json                — English translation strings
 │   └── ru.json                — Russian translation strings
 └── services/
-    ├── downloader.py          — VideoDownloader class, yt-dlp wrapper, cache, Instagram logic
+    ├── downloader.py          — Public facade, source orchestration, shared requests
+    ├── media.py               — DownloadResult, CarouselSlide and constants
+    ├── download_cache.py      — Atomic cache persistence and file leases
+    ├── download_jobs.py       — Global/per-user limits for expensive operations
+    ├── download_worker.py     — Isolated worker and hard download deadline
+    ├── process_tree.py        — Windows process tree ownership
+    ├── cookies.py             — Platform cookies and per-job snapshots
+    ├── instagram.py           — Instagram metadata and photo extraction
+    ├── twitter.py             — Ordered Twitter media extraction
+    ├── media_io.py            — Image downloads, ffprobe and frame extraction
+    ├── ytdlp_backend.py       — Bounded yt-dlp extraction and entry/file mapping
     ├── database.py            — DatabaseService class, User/DownloadStats/UserPreference ORM models
     ├── i18n.py                — get_text(), Translator class, normalize_language(), translate_download_error()
     └── url_utils.py           — URL normalization, platform detection, kkinstagram fallback
@@ -129,6 +141,10 @@ Schema is created automatically on startup; Alembic is installed but not configu
 | `GIF_MAX_DURATION` | No | `/gif` max duration in seconds (default `15`) |
 | `GIF_MAX_SIZE` | No | `/gif` max long-side resolution in px (default `640`) |
 | `GIF_CRF` | No | `/gif` H.264 quality; lower = better/heavier (default `28`) |
+| `DOWNLOAD_TIMEOUT` | No | Worker deadline in seconds (default `300`); expiry terminates its process tree |
+| `MAX_CONCURRENT_JOBS` | No | Shared running limit for downloads, searches and conversions (default `3`) |
+| `MAX_QUEUED_JOBS` | No | Additional pending jobs (default `12`) |
+| `MAX_USER_JOBS` | No | Running + queued jobs per user (default `2`); only one executes at once |
 | `CACHE_AUTOCLEAN_DEFAULT` | No | Auto-clean ON by default until an admin toggles it in `/cache` (default `false`) |
 | `CACHE_MAX_AGE_HOURS` | No | Default cache entry max age in hours; older entries are evicted (default `168` = 7 days) |
 | `CACHE_CLEANUP_INTERVAL` | No | How often the background cleanup task checks the cache, seconds (default `3600`, min `60`) |

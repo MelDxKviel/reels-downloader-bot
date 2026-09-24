@@ -81,11 +81,14 @@ async def _run_ffmpeg(cmd: list[str], timeout: int = 180) -> Optional[int]:
     )
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
         try:
             proc.kill()
         except Exception:
             pass
+        await proc.wait()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         return None
     return proc.returncode
 
@@ -121,45 +124,50 @@ async def _convert_to_gif(input_path: str) -> Optional[str]:
         (min(GIF_FPS, 15), min(GIF_MAX_SIZE, 360), min(51, GIF_CRF + 10)),
     ]
 
-    for fps, max_size, crf in attempts:
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            input_path,
-            "-t",
-            str(GIF_MAX_DURATION),
-            "-an",
-            "-vf",
-            _gif_video_filter(fps, max_size),
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-profile:v",
-            "main",
-            "-preset",
-            "veryfast",
-            "-crf",
-            str(crf),
-            "-movflags",
-            "+faststart",
-            output_path,
-        ]
+    keep_output = False
+    try:
+        for fps, max_size, crf in attempts:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                input_path,
+                "-t",
+                str(GIF_MAX_DURATION),
+                "-an",
+                "-vf",
+                _gif_video_filter(fps, max_size),
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-profile:v",
+                "main",
+                "-preset",
+                "veryfast",
+                "-crf",
+                str(crf),
+                "-movflags",
+                "+faststart",
+                output_path,
+            ]
 
-        returncode = await _run_ffmpeg(cmd)
+            returncode = await _run_ffmpeg(cmd)
 
-        if returncode != 0 or not os.path.exists(output_path):
+            if returncode != 0 or not os.path.exists(output_path):
+                return None
+
+            if os.path.getsize(output_path) <= MAX_FILE_SIZE:
+                keep_output = True
+                return output_path
+
+            # Too heavy for Telegram — drop quality and retry.
             _remove_quietly(output_path)
-            return None
 
-        if os.path.getsize(output_path) <= MAX_FILE_SIZE:
-            return output_path
-
-        # Too heavy for Telegram — drop quality and retry.
-        _remove_quietly(output_path)
-
-    return None
+        return None
+    finally:
+        if not keep_output:
+            _remove_quietly(output_path)
 
 
 async def _send_gif(
@@ -174,7 +182,9 @@ async def _send_gif(
     """Конвертирует файл и отправляет как анимацию (GIF)."""
     await status_msg.edit_text(t("gif.convert_status"))
 
-    gif_path = await _convert_to_gif(file_path)
+    gif_path = await downloader.run_conversion(
+        message.from_user.id, lambda: _convert_to_gif(file_path)
+    )
 
     if gif_path is None:
         await status_msg.edit_text(t("gif.convert_error"))
@@ -217,7 +227,7 @@ async def _download_and_send_gif(
     try:
         # allow_carousel=False: для конвертации нужен реальный видеофайл, а не
         # фото-слайды карусели (их file_path указывал бы на JPG).
-        result = await downloader.download(url, allow_carousel=False)
+        result = await downloader.download(url, allow_carousel=False, user_id=message.from_user.id)
     except Exception as e:
         logger.error("Ошибка скачивания: %s", e, exc_info=True)
         await status_msg.edit_text(t("gif.download_error"))
@@ -226,15 +236,19 @@ async def _download_and_send_gif(
         )
         return
 
-    if not result.success or not result.file_path:
-        reason = html.escape(translate_download_error(t, result))
-        await status_msg.edit_text(t("gif.failed", reason=reason))
-        await db.record_download(
-            user_id=message.from_user.id, platform=platform, url=url, success=False
-        )
-        return
+    try:
+        if not result.success or not result.file_path:
+            reason = html.escape(translate_download_error(t, result))
+            await status_msg.edit_text(t("gif.failed", reason=reason))
+            await db.record_download(
+                user_id=message.from_user.id, platform=platform, url=url, success=False
+            )
+            return
 
-    await _send_gif(message, db, status_msg, result.file_path, platform, url, t)
+        await _send_gif(message, db, status_msg, result.file_path, platform, url, t)
+    finally:
+        if not result.from_cache:
+            downloader.discard_result_files(result)
 
 
 @router.message(Command("gif"))
@@ -263,16 +277,24 @@ async def cmd_gif(message: Message, state: FSMContext, db: DatabaseService, t: T
 @router.callback_query(F.data.startswith("cancel_gif:"))
 async def cancel_gif(callback: CallbackQuery, state: FSMContext, t: Translator) -> None:
     """Отмена ожидания — только инициатор может отменить."""
-    owner_id = int(callback.data.split(":")[1])
+    try:
+        owner_id = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
     if callback.from_user.id != owner_id:
         await callback.answer(t("common.not_your_operation"), show_alert=True)
+        return
+    data = await state.get_data()
+    if callback.message is None or data.get("prompt_message_id") != callback.message.message_id:
+        await callback.answer(t("common.stale_prompt"))
         return
     await state.clear()
     await callback.message.edit_text(t("gif.cancelled"))
     await callback.answer()
 
 
-@router.message(GifStates.waiting_for_input, F.text)
+@router.message(GifStates.waiting_for_input, F.text, ~F.text.startswith("/"))
 async def gif_got_url(
     message: Message, state: FSMContext, db: DatabaseService, t: Translator
 ) -> None:

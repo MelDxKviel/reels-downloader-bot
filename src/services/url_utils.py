@@ -178,6 +178,26 @@ def is_instagram_url(url: str) -> bool:
     return host == "instagram.com" or host.endswith(".instagram.com")
 
 
+def is_single_youtube_video_url(url: str) -> bool:
+    """Accept video links while rejecting channel and playlist-only requests."""
+    if not is_youtube_url(url):
+        return False
+    parsed = urlparse(url)
+    path = parsed.path.strip("/")
+    host = (parsed.hostname or "").lower()
+    if host == "youtu.be" or host.endswith(".youtu.be"):
+        return bool(path and "/" not in path)
+    if path == "watch":
+        return any(name == "v" and value for name, value in parse_qsl(parsed.query))
+    parts = path.split("/")
+    return (
+        len(parts) == 2
+        and parts[0] in {"shorts", "live", "embed", "v"}
+        and bool(parts[1])
+        and parts[1] != "videoseries"
+    )
+
+
 def is_twitter_url(url: str) -> bool:
     """True for X/Twitter URLs (twitter.com or x.com, incl. subdomains)."""
     try:

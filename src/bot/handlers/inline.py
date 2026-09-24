@@ -57,6 +57,7 @@ from src.config import ADMIN_USERS, VIDEO_STORAGE_CHAT_ID
 from src.services.database import DatabaseService
 from src.services.downloader import downloader
 from src.services.i18n import Translator
+from src.services.media import CarouselSlide
 from src.services.url_utils import extract_url, get_url_hash
 from src.services.youtube_search import (
     build_shorts_url,
@@ -236,7 +237,7 @@ async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Trans
 async def _answer_shorts_search(query: InlineQuery, text: str, t: Translator) -> None:
     """Ищет 3 YouTube Shorts по тексту и формирует inline-результаты."""
     try:
-        shorts = await search_shorts(text, count=SHORTS_SEARCH_RESULTS)
+        shorts = await search_shorts(text, count=SHORTS_SEARCH_RESULTS, user_id=query.from_user.id)
     except Exception as e:
         logger.warning("Shorts search exception for %r: %s", text, e)
         shorts = []
@@ -379,19 +380,11 @@ async def chosen_inline_handler(
     platform = downloader.get_platform_name(url)
     user_id = chosen.from_user.id
 
-    # Карусель из общего кэша можно сразу переиспользовать; для остальных inline
-    # загрузок общий кэш по-прежнему обходится, а временные файлы удаляются ниже.
+    cache_media = operation in {"download", "s"}
     try:
-        cached_result = downloader.get_from_cache(url) if operation == "download" else None
-        cached_slides = (
-            cached_result.carousel_slides
-            if cached_result is not None and isinstance(cached_result.carousel_slides, list)
-            else None
+        result = await downloader.download(
+            url, allow_carousel=cache_media, reserve=cache_media, user_id=user_id
         )
-        if cached_result is not None and cached_slides and len(cached_slides) >= 2:
-            result = cached_result
-        else:
-            result = await downloader.download(url, allow_carousel=False)
     except Exception as e:
         logger.error("Ошибка скачивания (inline): %s", e, exc_info=True)
         await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
@@ -408,16 +401,9 @@ async def chosen_inline_handler(
         if operation == "download" or operation == "s":
             slides = result.carousel_slides if isinstance(result.carousel_slides, list) else None
             if slides and len(slides) >= 2:
-                carousel_file_ids = None
-                photo_paths = result.photo_paths if result.is_photo else None
-                if (
-                    photo_paths
-                    and len(photo_paths) == len(slides)
-                    and not any(slide.is_video for slide in slides)
-                ):
-                    carousel_file_ids = await _upload_carousel_photos_and_get_file_ids(
-                        bot, photo_paths
-                    )
+                carousel_file_ids = await _upload_carousel_and_get_file_ids(
+                    bot, slides, photo_paths=result.photo_paths
+                )
                 sent_as_carousel = await edit_inline_rich_carousel(
                     bot,
                     inline_message_id,
@@ -462,6 +448,7 @@ async def chosen_inline_handler(
                     width=result.width,
                     height=result.height,
                     duration=result.duration,
+                    cache_file_id=not bool(slides and len(slides) >= 2),
                 )
 
         elif operation == "mp3":
@@ -477,9 +464,9 @@ async def chosen_inline_handler(
                 t,
             )
     finally:
-        # Временные inline-загрузки не попадают в общий кэш и удаляются сразу.
-        # Результат карусели, взятый из общего кэша, принадлежит cache cleanup.
-        if not result.from_cache:
+        if cache_media:
+            downloader.release_result(result)
+        else:
             downloader.discard_result_files(result)
 
 
@@ -496,6 +483,7 @@ async def _handle_video(
     width: Optional[int] = None,
     height: Optional[int] = None,
     duration: Optional[float] = None,
+    cache_file_id: bool = True,
 ) -> None:
     """Загружает видео в storage и подменяет inline-заглушку."""
     file_id = await _upload_video_and_get_file_id(
@@ -506,7 +494,8 @@ async def _handle_video(
         await db.record_download(user_id=user_id, platform=platform, url=url, success=False)
         return
 
-    downloader.set_telegram_file_id(url, file_id)
+    if cache_file_id:
+        downloader.set_telegram_file_id(url, file_id)
 
     try:
         await retry_transient_telegram(
@@ -590,6 +579,32 @@ async def _upload_carousel_photos_and_get_file_ids(
     return file_ids
 
 
+async def _upload_carousel_and_get_file_ids(
+    bot: Bot, slides: list[CarouselSlide], *, photo_paths: Optional[list[str]] = None
+) -> Optional[list[str]]:
+    """Upload ordered photo/video slides before an inline rich-message edit."""
+    paths = [slide.local_path for slide in slides]
+    all_photos = not any(slide.is_video for slide in slides)
+    if all_photos and not all(paths) and photo_paths and len(photo_paths) == len(slides):
+        paths = photo_paths
+    if not all(isinstance(path, str) and path for path in paths):
+        return None
+    if all_photos:
+        return await _upload_carousel_photos_and_get_file_ids(bot, paths)
+    file_ids: list[str] = []
+    for slide, path in zip(slides, paths, strict=True):
+        if slide.is_video:
+            file_id = await _upload_video_and_get_file_id(
+                bot, path, width=slide.width, height=slide.height, duration=slide.duration
+            )
+        else:
+            file_id = await _upload_photo_and_get_file_id(bot, path)
+        if not file_id:
+            return None
+        file_ids.append(file_id)
+    return file_ids
+
+
 async def _handle_mp3(
     bot: Bot,
     db: DatabaseService,
@@ -604,7 +619,7 @@ async def _handle_mp3(
     """Конвертирует в MP3, загружает в storage и подменяет inline-заглушку."""
     mp3_path: Optional[str] = None
     try:
-        mp3_path = await _convert_to_mp3(file_path)
+        mp3_path = await downloader.run_conversion(user_id, lambda: _convert_to_mp3(file_path))
     except Exception as e:
         logger.error("Ошибка конвертации в MP3 (inline): %s", e, exc_info=True)
 

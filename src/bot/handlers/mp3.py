@@ -70,28 +70,35 @@ async def _convert_to_mp3(input_path: str) -> Optional[str]:
         output_path,
     ]
 
+    keep_output = False
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.wait_for(proc.wait(), timeout=120)
-    except asyncio.TimeoutError:
         try:
-            proc.kill()
-        except Exception:
-            pass
-        return None
+            await asyncio.wait_for(proc.wait(), timeout=120)
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            await proc.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return None
 
-    if proc.returncode == 0 and os.path.exists(output_path):
-        return output_path
-    if os.path.exists(output_path):
-        try:
-            os.remove(output_path)
-        except Exception:
-            pass
-    return None
+        if proc.returncode == 0 and os.path.exists(output_path):
+            keep_output = True
+            return output_path
+        return None
+    finally:
+        if not keep_output and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
 
 
 async def _send_mp3(
@@ -106,7 +113,9 @@ async def _send_mp3(
     """Конвертирует файл и отправляет как аудио MP3."""
     await status_msg.edit_text(t("mp3.convert_status"))
 
-    mp3_path = await _convert_to_mp3(file_path)
+    mp3_path = await downloader.run_conversion(
+        message.from_user.id, lambda: _convert_to_mp3(file_path)
+    )
 
     if mp3_path is None:
         await status_msg.edit_text(t("mp3.convert_error"))
@@ -149,7 +158,7 @@ async def _download_and_send_mp3(
     try:
         # allow_carousel=False: для конвертации нужен реальный видеофайл, а не
         # фото-слайды карусели (их file_path указывал бы на JPG).
-        result = await downloader.download(url, allow_carousel=False)
+        result = await downloader.download(url, allow_carousel=False, user_id=message.from_user.id)
     except Exception as e:
         logger.error("Ошибка скачивания: %s", e, exc_info=True)
         await status_msg.edit_text(t("mp3.download_error"))
@@ -158,15 +167,19 @@ async def _download_and_send_mp3(
         )
         return
 
-    if not result.success or not result.file_path:
-        reason = html.escape(translate_download_error(t, result))
-        await status_msg.edit_text(t("mp3.failed", reason=reason))
-        await db.record_download(
-            user_id=message.from_user.id, platform=platform, url=url, success=False
-        )
-        return
+    try:
+        if not result.success or not result.file_path:
+            reason = html.escape(translate_download_error(t, result))
+            await status_msg.edit_text(t("mp3.failed", reason=reason))
+            await db.record_download(
+                user_id=message.from_user.id, platform=platform, url=url, success=False
+            )
+            return
 
-    await _send_mp3(message, db, status_msg, result.file_path, platform, url, t)
+        await _send_mp3(message, db, status_msg, result.file_path, platform, url, t)
+    finally:
+        if not result.from_cache:
+            downloader.discard_result_files(result)
 
 
 @router.message(Command("mp3"))
@@ -195,16 +208,24 @@ async def cmd_mp3(message: Message, state: FSMContext, db: DatabaseService, t: T
 @router.callback_query(F.data.startswith("cancel_mp3:"))
 async def cancel_mp3(callback: CallbackQuery, state: FSMContext, t: Translator) -> None:
     """Отмена ожидания — только инициатор может отменить."""
-    owner_id = int(callback.data.split(":")[1])
+    try:
+        owner_id = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
     if callback.from_user.id != owner_id:
         await callback.answer(t("common.not_your_operation"), show_alert=True)
+        return
+    data = await state.get_data()
+    if callback.message is None or data.get("prompt_message_id") != callback.message.message_id:
+        await callback.answer(t("common.stale_prompt"))
         return
     await state.clear()
     await callback.message.edit_text(t("mp3.cancelled"))
     await callback.answer()
 
 
-@router.message(Mp3States.waiting_for_input, F.text)
+@router.message(Mp3States.waiting_for_input, F.text, ~F.text.startswith("/"))
 async def mp3_got_url(
     message: Message, state: FSMContext, db: DatabaseService, t: Translator
 ) -> None:

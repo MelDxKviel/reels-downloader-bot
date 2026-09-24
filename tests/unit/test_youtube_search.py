@@ -147,8 +147,18 @@ def test_stops_after_reaching_count():
 
 @pytest.mark.asyncio
 async def test_search_shorts_async_returns_results():
-    """search_shorts must dispatch through run_in_executor and return data."""
-    info = {"entries": [_make_entry("async_id", duration=10)]}
-    with patch.object(ys.yt_dlp, "YoutubeDL", return_value=_fake_ydl(info)):
-        results = await ys.search_shorts("real query", count=3)
+    """Search results cross the isolated-worker boundary without losing metadata."""
+    from unittest.mock import AsyncMock
+
+    raw = {
+        "video_id": "async_id",
+        "title": "t",
+        "url": "https://youtube.com/shorts/async_id",
+        "thumbnail": None,
+        "duration": 10,
+        "channel": "channel",
+    }
+    with patch.object(ys, "run_search_worker", AsyncMock(return_value=[raw])) as worker:
+        results = await ys.search_shorts("real query", count=3, user_id=10)
     assert [r.video_id for r in results] == ["async_id"]
+    worker.assert_awaited_once_with(ys.downloader.download_dir, "real query", 3)

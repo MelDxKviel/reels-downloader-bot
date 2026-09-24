@@ -1,5 +1,6 @@
 """Tests for inline-mode handler."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -381,7 +382,7 @@ async def test_chosen_inline_download_video_success(tmp_path):
     upload.assert_awaited_once_with(bot, str(video), width=720, height=1280, duration=9.0)
     media = bot.edit_message_media.await_args.kwargs["media"]
     assert (media.width, media.height, media.duration) == (720, 1280, 9)
-    assert not video.exists()
+    assert video.exists()  # the shared media cache owns successful inline downloads
 
 
 @pytest.mark.asyncio
@@ -485,7 +486,7 @@ async def test_chosen_inline_photo_carousel_edits_rich_message_with_file_ids(tmp
     ):
         await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
 
-    download.assert_awaited_once_with(url, allow_carousel=False)
+    download.assert_awaited_once_with(url, allow_carousel=True, reserve=True, user_id=100)
     upload_carousel.assert_awaited_once_with(bot, [str(path) for path in paths])
     assert bot.edit_message_text.await_count == 2
     sleep.assert_awaited_once_with(1.0)
@@ -497,7 +498,7 @@ async def test_chosen_inline_photo_carousel_edits_rich_message_with_file_ids(tmp
     ]
     bot.edit_message_media.assert_not_awaited()
     assert db.record_download.await_args.kwargs["success"] is True
-    assert all(not path.exists() for path in paths)
+    assert all(path.exists() for path in paths)  # cache owns the media after inline upload
 
 
 @pytest.mark.asyncio
@@ -537,7 +538,7 @@ async def test_chosen_inline_photo_carousel_rich_failure_falls_back_to_first_pho
     bot.edit_message_media.assert_awaited_once()
     cache_first.assert_not_called()
     assert db.record_download.await_args.kwargs["success"] is True
-    assert all(not path.exists() for path in paths)
+    assert all(path.exists() for path in paths)  # cache owns the media after inline upload
 
 
 @pytest.mark.asyncio
@@ -920,3 +921,58 @@ async def test_chosen_inline_mp3_remove_temp_file_fails(tmp_path):
                 with patch("src.bot.handlers.inline.os.remove", side_effect=OSError("nope")):
                     await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
     bot.edit_message_media.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kinds", [(False, True), (True, True)])
+async def test_inline_mixed_and_video_carousels_upload_every_slide_in_order(tmp_path, kinds):
+    bot, db = make_bot(), make_db()
+    url = "https://instagram.com/p/MIXED/"
+    slides = []
+    for index, is_video in enumerate(kinds):
+        path = tmp_path / f"{index}.{'mp4' if is_video else 'jpg'}"
+        path.write_bytes(b"media")
+        slides.append(
+            CarouselSlide(f"https://cdn/{path.name}", is_video, str(path), 720, 1280, 4 + index)
+        )
+    result = DownloadResult(
+        success=True,
+        file_path=slides[0].local_path,
+        is_photo=not kinds[0],
+        carousel_slides=slides,
+    )
+    upload_video = AsyncMock(side_effect=lambda _bot, path, **kw: "video_" + Path(path).stem)
+    upload_photo = AsyncMock(side_effect=lambda _bot, path: "photo_" + Path(path).stem)
+    with (
+        patch.object(inline_h.downloader, "download", AsyncMock(return_value=result)),
+        patch.object(inline_h.downloader, "release_result") as release,
+        patch.object(inline_h, "_upload_video_and_get_file_id", upload_video),
+        patch.object(inline_h, "_upload_photo_and_get_file_id", upload_photo),
+    ):
+        await inline_h.chosen_inline_handler(
+            make_chosen_result("download:abc", url), bot, db, Translator("en")
+        )
+    rich = bot.edit_message_text.await_args.kwargs["rich_message"]
+    assert [item.media.media for item in rich.media] == [
+        ("video_" if is_video else "photo_") + str(index) for index, is_video in enumerate(kinds)
+    ]
+    assert upload_video.await_count == sum(kinds)
+    assert upload_photo.await_count == len(kinds) - sum(kinds)
+    for call in upload_video.await_args_list:
+        assert call.kwargs["width"] == 720 and call.kwargs["height"] == 1280
+    bot.edit_message_media.assert_not_awaited()
+    release.assert_called_once_with(result)
+    assert db.record_download.await_args.kwargs["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_mixed_carousel_upload_failure_never_returns_partial_ids():
+    slides = [
+        CarouselSlide("https://cdn/a.jpg", local_path="a.jpg"),
+        CarouselSlide("https://cdn/b.mp4", True, "b.mp4"),
+    ]
+    with (
+        patch.object(inline_h, "_upload_photo_and_get_file_id", AsyncMock(return_value="photo")),
+        patch.object(inline_h, "_upload_video_and_get_file_id", AsyncMock(return_value=None)),
+    ):
+        assert await inline_h._upload_carousel_and_get_file_ids(make_bot(), slides) is None

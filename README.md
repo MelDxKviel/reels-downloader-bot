@@ -81,6 +81,10 @@ DOWNLOAD_DIR=downloads                   # Directory for downloaded files
 YT_COOKIES_FILE=./cookies.txt            # Cookies for age-restricted YouTube
 INSTA_COOKIES_FILE=./instagram-cookies.txt  # Cookies for Instagram (private accounts)
 VIDEO_STORAGE_CHAT_ID=-1001234567890     # Chat for inline pre-upload (fallback: first ADMIN_USERS)
+DOWNLOAD_TIMEOUT=300                    # Download timeout, seconds
+MAX_CONCURRENT_JOBS=3                   # Active downloads, conversions and searches
+MAX_QUEUED_JOBS=12                      # Additional jobs allowed to wait
+MAX_USER_JOBS=2                         # Active + queued jobs per user
 
 # Docker Compose only
 YT_COOKIES_FILE_HOST_PATH=./cookies.txt               # Host path to YouTube cookies
@@ -100,6 +104,17 @@ INSTA_COOKIES_FILE_HOST_PATH=./instagram-cookies.txt  # Host path to Instagram c
 | `YT_COOKIES_FILE` | ❌ | Path to Netscape cookies file for YouTube |
 | `INSTA_COOKIES_FILE` | ❌ | Path to Netscape cookies file for Instagram |
 | `VIDEO_STORAGE_CHAT_ID` | ❌ | Chat for temporary video upload in inline mode to obtain `file_id`. If not set, falls back to the first admin in `ADMIN_USERS` |
+| `DOWNLOAD_TIMEOUT` | ❌ | Download timeout in seconds (default: `300`) |
+| `MAX_CONCURRENT_JOBS` | ❌ | Maximum simultaneous downloads, conversions and searches (default: `3`) |
+| `MAX_QUEUED_JOBS` | ❌ | Maximum waiting jobs beyond the active workers (default: `12`) |
+| `MAX_USER_JOBS` | ❌ | Maximum active and queued jobs per user (default: `2`) |
+| `GIF_FPS` | ❌ | Animation frame rate (default: `30`) |
+| `GIF_MAX_DURATION` | ❌ | Maximum animation duration in seconds (default: `15`) |
+| `GIF_MAX_SIZE` | ❌ | Maximum long-side animation resolution in pixels (default: `640`) |
+| `GIF_CRF` | ❌ | H.264 quality; lower means better quality and larger files (default: `28`) |
+| `CACHE_AUTOCLEAN_DEFAULT` | ❌ | Enable automatic cache cleanup until overridden in `/cache` (default: `false`) |
+| `CACHE_MAX_AGE_HOURS` | ❌ | Cache retention until overridden in `/cache` (default: `168`, seven days) |
+| `CACHE_CLEANUP_INTERVAL` | ❌ | Cleanup check interval in seconds (default: `3600`, minimum: `60`) |
 | `YT_COOKIES_FILE_HOST_PATH` | Docker | Host path to YouTube cookies (mounted into container) |
 | `INSTA_COOKIES_FILE_HOST_PATH` | Docker | Host path to Instagram cookies (mounted into container) |
 
@@ -144,6 +159,12 @@ docker compose down
 - `db` — PostgreSQL 17 Alpine with health check
 - Database data is stored in the `postgres_data` volume
 - Downloaded files are mounted at `./downloads/`
+
+Both Compose files pass `DEFAULT_LANGUAGE`, `VIDEO_STORAGE_CHAT_ID`, `GIF_*`, `CACHE_*`,
+`DOWNLOAD_TIMEOUT` and the three `MAX_*_JOBS` limits from `.env` into the bot. After editing
+these values, run `docker compose up -d bot` (add `-f docker-compose.local.yml` for a local
+build). Cache preferences already saved through `/cache` take precedence over the initial
+cleanup defaults.
 
 ---
 

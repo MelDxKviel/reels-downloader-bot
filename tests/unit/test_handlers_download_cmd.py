@@ -208,7 +208,8 @@ async def test_cancel_download_wrong_owner():
 @pytest.mark.asyncio
 async def test_cancel_download_success():
     cb = make_callback("cancel_download:1", user_id=1)
-    state = make_state()
+    cb.message.message_id = 99
+    state = make_state({"prompt_message_id": 99})
     await dc.cancel_download(cb, state, Translator("en"))
     state.clear.assert_awaited()
     cb.message.edit_text.assert_awaited()
