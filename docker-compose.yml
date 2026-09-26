@@ -1,6 +1,6 @@
 services:
   bot:
-    image: ${BOT_IMAGE:-ghcr.io/meldxkviel/reels-downloader-bot:latest}
+    image: ${BOT_IMAGE:-ghcr.io/mightarm/reels-downloader-bot:latest}
     container_name: downloader-bot
     restart: unless-stopped
     init: true
