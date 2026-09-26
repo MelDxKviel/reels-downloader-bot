@@ -12,10 +12,10 @@ _INSTAGRAM_SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstu
 _IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".mkv", ".m4v"})
 
-# Older entries can contain a wrong Instagram thumbnail or a carousel truncated
-# to the legacy 10-item album limit. Media cache entries are disposable, so old
-# photo/video fields are lazily discarded while unrelated MP3 file IDs survive.
-_MEDIA_CACHE_VERSION = 4
+# Older entries/file IDs lack explicit video previews (or have legacy photo data).
+# Discard them lazily so Telegram does not keep serving a broken auto-thumbnail;
+# unrelated MP3 file IDs survive.
+_MEDIA_CACHE_VERSION = 5
 
 
 def _download_retry_delay(n: int) -> float:
@@ -67,6 +67,8 @@ class CarouselSlide:
     width: Optional[int] = None
     height: Optional[int] = None
     duration: Optional[float] = None
+    thumbnail_path: Optional[str] = None
+    cover_path: Optional[str] = None
 
 
 @dataclass
@@ -99,3 +101,5 @@ class DownloadResult:
     # нативной rich-карусели (<tg-slideshow>). photo_paths при этом остаётся
     # локальным фолбэком (альбом), если rich-сообщение отправить не удалось.
     carousel_slides: Optional[list] = None
+    thumbnail_path: Optional[str] = None
+    cover_path: Optional[str] = None

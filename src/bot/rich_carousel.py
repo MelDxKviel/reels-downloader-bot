@@ -20,6 +20,7 @@ from src.bot.telegram_retry import (
     retry_transient_telegram,
     telegram_duration,
 )
+from src.bot.video_preview import video_preview_inputs
 from src.services.downloader import CarouselSlide
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ def _attached_media_rich_message(
     slides: Sequence[CarouselSlide],
     caption: str | None,
     media_values: Sequence[FSInputFile | str] | None,
+    media_cover_file_ids: Sequence[str | None] | None = None,
 ) -> InputRichMessage | None:
     """Build a rich message backed by uploads or reusable Telegram file IDs."""
 
@@ -72,8 +74,14 @@ def _attached_media_rich_message(
     attachments: list[InputRichMessageMedia] = []
     for slide, media_value, media_id in zip(slides, media_values, media_ids, strict=True):
         if slide.is_video:
+            preview_inputs = (
+                video_preview_inputs(slide) if isinstance(media_value, FSInputFile) else {}
+            )
+            if media_cover_file_ids and not isinstance(media_value, FSInputFile):
+                preview_inputs["cover"] = media_cover_file_ids[len(attachments)]
             media = InputMediaVideo(
                 media=media_value,
+                **preview_inputs,
                 supports_streaming=True,
                 width=slide.width,
                 height=slide.height,
@@ -95,11 +103,14 @@ def rich_carousel_variants(
     *,
     media_paths: Sequence[str] | None = None,
     media_file_ids: Sequence[str] | None = None,
+    media_cover_file_ids: Sequence[str | None] | None = None,
 ) -> list[InputRichMessage]:
     """Return upload-first and public-URL fallback variants of a slideshow."""
 
     if media_paths is not None and media_file_ids is not None:
         raise ValueError("media_paths and media_file_ids are mutually exclusive")
+    if media_cover_file_ids is not None and len(media_cover_file_ids) != len(slides):
+        raise ValueError("media_cover_file_ids must match slides")
 
     variants: list[InputRichMessage] = []
     media_values: Sequence[FSInputFile | str] | None = media_file_ids
@@ -109,7 +120,9 @@ def rich_carousel_variants(
     if media_paths is not None and len(media_paths) == len(slides):
         if all(isinstance(path, str) and os.path.isfile(path) for path in media_paths):
             media_values = [FSInputFile(path) for path in media_paths]
-    attached_variant = _attached_media_rich_message(slides, caption, media_values)
+    attached_variant = _attached_media_rich_message(
+        slides, caption, media_values, media_cover_file_ids
+    )
     if attached_variant is not None:
         variants.append(attached_variant)
     if all(slide.url for slide in slides):
@@ -154,6 +167,7 @@ async def edit_inline_rich_carousel(
     caption: str | None = None,
     *,
     media_file_ids: Sequence[str] | None = None,
+    media_cover_file_ids: Sequence[str | None] | None = None,
 ) -> bool:
     """Replace an inline placeholder with a rich slideshow.
 
@@ -162,7 +176,11 @@ async def edit_inline_rich_carousel(
     forbidden by the inline edit contract.
     """
 
-    rich_message = _attached_media_rich_message(slides, caption, media_file_ids)
+    if media_cover_file_ids is not None and len(media_cover_file_ids) != len(slides):
+        raise ValueError("media_cover_file_ids must match slides")
+    rich_message = _attached_media_rich_message(
+        slides, caption, media_file_ids, media_cover_file_ids
+    )
     if rich_message is None:
         return False
     try:

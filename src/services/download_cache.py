@@ -143,6 +143,8 @@ class DownloadCacheMixin:
             "is_photo",
             "media_type_confirmed",
             "carousel_slides",
+            "thumbnail_path",
+            "cover_path",
         ):
             entry.pop(key, None)
 
@@ -186,6 +188,8 @@ class DownloadCacheMixin:
         return {
             "file_path": result.file_path,
             "photo_paths": result.photo_paths,
+            "thumbnail_path": result.thumbnail_path,
+            "cover_path": result.cover_path,
             "carousel_slides": [asdict(slide) for slide in result.carousel_slides or []],
         }
 
@@ -264,6 +268,8 @@ class DownloadCacheMixin:
                     photo_paths=[file_path] if is_photo else None,
                     width=cached.get("width"),
                     height=cached.get("height"),
+                    thumbnail_path=cached.get("thumbnail_path"),
+                    cover_path=cached.get("cover_path"),
                     media_type_confirmed=bool(cached.get("media_type_confirmed", False)),
                     carousel_slides=self._deserialize_carousel_slides(
                         cached.get("carousel_slides")
@@ -313,6 +319,8 @@ class DownloadCacheMixin:
                 "duration": result.duration,
                 "width": result.width,
                 "height": result.height,
+                "thumbnail_path": result.thumbnail_path,
+                "cover_path": result.cover_path,
                 "media_cache_version": _MEDIA_CACHE_VERSION,
                 "cached_at": time.time(),
             }
@@ -472,18 +480,21 @@ class DownloadCacheMixin:
     def _entry_file_paths(data: dict) -> list[str]:
         """Локальные файлы записи кэша (видео и/или фото) без дублей."""
         paths: list[str] = []
-        file_path = data.get("file_path")
-        if isinstance(file_path, str):
-            paths.append(file_path)
+        for key in ("file_path", "thumbnail_path", "cover_path"):
+            path = data.get(key)
+            if isinstance(path, str) and path and path not in paths:
+                paths.append(path)
         photo_paths = data.get("photo_paths")
         if isinstance(photo_paths, list):
             for p in photo_paths:
                 if isinstance(p, str) and p not in paths:
                     paths.append(p)
         for slide in data.get("carousel_slides") or []:
-            path = slide.get("local_path") if isinstance(slide, dict) else None
-            if isinstance(path, str) and path and path not in paths:
-                paths.append(path)
+            if isinstance(slide, dict):
+                for key in ("local_path", "thumbnail_path", "cover_path"):
+                    path = slide.get(key)
+                    if isinstance(path, str) and path and path not in paths:
+                        paths.append(path)
         return paths
 
     @cache_locked

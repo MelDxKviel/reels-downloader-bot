@@ -24,6 +24,7 @@ from src.bot.telegram_retry import (
     retry_transient_telegram,
     telegram_duration,
 )
+from src.bot.video_preview import video_preview_inputs
 from src.services.database import DatabaseService
 from src.services.downloader import DownloadResult, downloader
 from src.services.i18n import Translator, translate_download_error
@@ -115,6 +116,7 @@ async def _download_and_send(
                     lambda: message.bot.send_video(
                         chat_id=message.chat.id,
                         video=FSInputFile(result.file_path),
+                        **video_preview_inputs(result),
                         duration=telegram_duration(result.duration),
                         width=result.width,
                         height=result.height,

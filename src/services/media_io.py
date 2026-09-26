@@ -2,12 +2,14 @@
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -22,6 +24,103 @@ logger = logging.getLogger(__name__)
 
 
 class MediaIOMixin:
+    def _prepare_video_previews(self, result: DownloadResult) -> None:
+        """Decode explicit covers once per video, including every carousel slide."""
+        if not result.success or not self.has_ffmpeg:
+            return
+        previews: dict[str, tuple[Optional[str], Optional[str]]] = {}
+
+        def prepare(path, duration):
+            if path not in previews:
+                previews[path] = self._extract_video_previews(path, duration)
+            return previews[path]
+
+        if result.file_path and not result.is_photo:
+            result.thumbnail_path, result.cover_path = prepare(result.file_path, result.duration)
+        for slide in result.carousel_slides or []:
+            if slide.is_video and slide.local_path:
+                slide.thumbnail_path, slide.cover_path = prepare(slide.local_path, slide.duration)
+
+    @staticmethod
+    def _extract_video_previews(
+        video_path: str, duration: Optional[float]
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Produce a <=320px JPEG thumbnail and a sharper <=1280px cover.
+
+        FFmpeg decodes the selected frame (with autorotation) instead of trusting
+        a platform's often square cover or Telegram's automatic first frame.
+        Preview errors are optional: keep the original video playable.
+        """
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None, None
+        thumbnail = Path(video_path).with_suffix(".thumbnail.jpg")
+        cover = Path(video_path).with_suffix(".cover.jpg")
+        timestamp = (
+            min(1.0, duration / 2) if duration and math.isfinite(duration) and duration > 0 else 1.0
+        )
+
+        def scale(size):
+            # Normalize non-square pixels before fitting, without cropping or upscaling.
+            return (
+                "scale=iw*sar:ih,setsar=1,"
+                f"scale=w='min({size},iw)':h='min({size},ih)'"
+                ":force_original_aspect_ratio=decrease"
+            )
+
+        for seek in (timestamp, 0.0):
+            try:
+                proc = subprocess.run(
+                    [
+                        ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-nostdin",
+                        "-y",
+                        "-ss",
+                        str(seek),
+                        "-i",
+                        video_path,
+                        "-filter_complex",
+                        f"[0:v:0]split=2[c][t];[c]{scale(1280)}[cover];[t]{scale(320)}[thumb]",
+                        "-map",
+                        "[cover]",
+                        "-frames:v",
+                        "1",
+                        "-q:v",
+                        "3",
+                        str(cover),
+                        "-map",
+                        "[thumb]",
+                        "-frames:v",
+                        "1",
+                        "-q:v",
+                        "5",
+                        str(thumbnail),
+                    ],
+                    capture_output=True,
+                    timeout=15,
+                    **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+                )
+                if (
+                    proc.returncode == 0
+                    and cover.is_file()
+                    and 0 < cover.stat().st_size < 10 * 1024 * 1024
+                    and thumbnail.is_file()
+                    and 0 < thumbnail.stat().st_size < 200_000
+                ):
+                    return str(thumbnail), str(cover)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                logger.warning("Video preview extraction failed for %s: %s", video_path, exc)
+            for path in (thumbnail, cover):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Could not remove partial video preview %s", path)
+        logger.warning("Could not generate video previews for %s", video_path)
+        return None, None
+
     def _download_image_sync(self, image_url: str, output_base: str) -> Optional[str]:
         """
         Скачивает картинку по прямой ссылке и сохраняет её рядом с output_base,

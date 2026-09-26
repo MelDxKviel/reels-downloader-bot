@@ -171,7 +171,11 @@ async def _main(result_path: Path) -> None:
         from src.services.downloader import VideoDownloader
 
         service = VideoDownloader(str(result_path.parent))
-        result = asdict(await service._download_source(request["url"], request["allow_carousel"]))
+        media = await service._download_source(request["url"], request["allow_carousel"])
+        # FFmpeg stays inside the isolated worker and its hard process-tree deadline.
+        if request["allow_carousel"]:
+            service._prepare_video_previews(media)
+        result = asdict(media)
     result_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 

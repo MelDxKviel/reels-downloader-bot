@@ -401,8 +401,19 @@ async def chosen_inline_handler(
         if operation == "download" or operation == "s":
             slides = result.carousel_slides if isinstance(result.carousel_slides, list) else None
             if slides and len(slides) >= 2:
+                carousel_cover_ids = None
+                if any(slide.is_video and slide.cover_path for slide in slides):
+                    carousel_cover_ids = [
+                        await _upload_photo_and_get_file_id(bot, slide.cover_path)
+                        if slide.is_video and slide.cover_path
+                        else None
+                        for slide in slides
+                    ]
                 carousel_file_ids = await _upload_carousel_and_get_file_ids(
-                    bot, slides, photo_paths=result.photo_paths
+                    bot,
+                    slides,
+                    photo_paths=result.photo_paths,
+                    **({"cover_file_ids": carousel_cover_ids} if carousel_cover_ids else {}),
                 )
                 sent_as_carousel = await edit_inline_rich_carousel(
                     bot,
@@ -410,6 +421,7 @@ async def chosen_inline_handler(
                     slides,
                     result.title,
                     media_file_ids=carousel_file_ids,
+                    **({"media_cover_file_ids": carousel_cover_ids} if carousel_cover_ids else {}),
                 )
                 if sent_as_carousel:
                     await db.record_download(
@@ -448,6 +460,8 @@ async def chosen_inline_handler(
                     width=result.width,
                     height=result.height,
                     duration=result.duration,
+                    thumbnail_path=result.thumbnail_path,
+                    cover_path=result.cover_path,
                     cache_file_id=not bool(slides and len(slides) >= 2),
                 )
 
@@ -484,10 +498,19 @@ async def _handle_video(
     height: Optional[int] = None,
     duration: Optional[float] = None,
     cache_file_id: bool = True,
+    thumbnail_path: Optional[str] = None,
+    cover_path: Optional[str] = None,
 ) -> None:
     """Загружает видео в storage и подменяет inline-заглушку."""
+    # Inline edits cannot attach a local JPEG; upload the cover for a reusable ID.
+    cover_id = await _upload_photo_and_get_file_id(bot, cover_path) if cover_path else None
+    preview_options = {}
+    if thumbnail_path:
+        preview_options["thumbnail_path"] = thumbnail_path
+    if cover_id:
+        preview_options["cover_file_id"] = cover_id
     file_id = await _upload_video_and_get_file_id(
-        bot, file_path, width=width, height=height, duration=duration
+        bot, file_path, width=width, height=height, duration=duration, **preview_options
     )
     if not file_id:
         await _safe_edit_text(bot, inline_message_id, t("inline.error.failed"))
@@ -507,6 +530,7 @@ async def _handle_video(
                     width=width,
                     height=height,
                     duration=telegram_duration(duration),
+                    cover=cover_id,
                 ),
                 reply_markup=None,
             ),
@@ -580,7 +604,11 @@ async def _upload_carousel_photos_and_get_file_ids(
 
 
 async def _upload_carousel_and_get_file_ids(
-    bot: Bot, slides: list[CarouselSlide], *, photo_paths: Optional[list[str]] = None
+    bot: Bot,
+    slides: list[CarouselSlide],
+    *,
+    photo_paths: Optional[list[str]] = None,
+    cover_file_ids: Optional[list[Optional[str]]] = None,
 ) -> Optional[list[str]]:
     """Upload ordered photo/video slides before an inline rich-message edit."""
     paths = [slide.local_path for slide in slides]
@@ -592,10 +620,20 @@ async def _upload_carousel_and_get_file_ids(
     if all_photos:
         return await _upload_carousel_photos_and_get_file_ids(bot, paths)
     file_ids: list[str] = []
-    for slide, path in zip(slides, paths, strict=True):
+    for index, (slide, path) in enumerate(zip(slides, paths, strict=True)):
         if slide.is_video:
+            preview_options = {}
+            if slide.thumbnail_path:
+                preview_options["thumbnail_path"] = slide.thumbnail_path
+            if cover_file_ids and cover_file_ids[index]:
+                preview_options["cover_file_id"] = cover_file_ids[index]
             file_id = await _upload_video_and_get_file_id(
-                bot, path, width=slide.width, height=slide.height, duration=slide.duration
+                bot,
+                path,
+                width=slide.width,
+                height=slide.height,
+                duration=slide.duration,
+                **preview_options,
             )
         else:
             file_id = await _upload_photo_and_get_file_id(bot, path)
@@ -693,6 +731,8 @@ async def _upload_video_and_get_file_id(
     width: Optional[int] = None,
     height: Optional[int] = None,
     duration: Optional[float] = None,
+    thumbnail_path: Optional[str] = None,
+    cover_file_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     Заливает видео в storage-чат и возвращает его Telegram file_id.
@@ -711,6 +751,8 @@ async def _upload_video_and_get_file_id(
                 duration=telegram_duration(duration),
                 width=width,
                 height=height,
+                thumbnail=FSInputFile(thumbnail_path) if thumbnail_path else None,
+                cover=cover_file_id,
                 supports_streaming=True,
                 disable_notification=True,
                 request_timeout=TELEGRAM_UPLOAD_TIMEOUT,
