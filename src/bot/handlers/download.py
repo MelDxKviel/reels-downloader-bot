@@ -146,8 +146,8 @@ async def handle_url(message: Message, db: DatabaseService, t: Translator) -> No
             for domain in ["youtube", "instagram", "kkinstagram", "tiktok", "twitter", "x.com"]
         ):
             await message.answer(t("download.invalid_link_hint"))
-        else:
-            await message.answer(t("download.send_link_hint"))
+        # else:
+        #     await message.answer(t("download.send_link_hint"))
         return
 
     platform = downloader.get_platform_name(url)
