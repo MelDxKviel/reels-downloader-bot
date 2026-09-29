@@ -132,7 +132,9 @@ def _gh_command(*arguments: str) -> list[str]:
 
 def _run_gh(command: list[str], *, input_text: str | None = None) -> None:
     try:
-        result = subprocess.run(command, input=input_text, text=True, check=False)
+        result = subprocess.run(
+            command, input=input_text, text=True, capture_output=True, check=False
+        )
     except OSError as exc:
         _fail(f"не удалось запустить GitHub CLI: {exc}")
     if result.returncode != 0:
@@ -189,7 +191,7 @@ def main() -> None:
         _gh_command("secret", "set", SECRET_NAME),
         input_text=encoded,
     )
-    print(f"GitHub secret {SECRET_NAME} обновлён")
+    print("Instagram cookies опубликованы в GitHub Actions")
 
     if not args.no_trigger:
         _run_gh(

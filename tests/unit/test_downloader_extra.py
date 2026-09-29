@@ -7,6 +7,7 @@ import threading
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
 
 import pytest
 
@@ -530,7 +531,7 @@ def test_fetch_instagram_media_info_trusts_photo_marker_only_on_target_embed(tmp
     def fake_get(candidate, **_kwargs):
         if "/embed" in candidate:
             return cover
-        if "www.instagram.com" in candidate:
+        if urlparse(candidate).hostname == "www.instagram.com":
             return cover + '{"media_type": 1}'
         return None
 
@@ -770,6 +771,73 @@ def test_limit_instagram_image_variants_counts_slides_not_signed_urls(tmp_path):
 
 
 # ── _download_image_sync ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "opening,closing",
+    [
+        ('<script type="application/json">', "</script >"),
+        ('<SCRIPT data-note="a > b">', "</SCRIPT\n>"),
+    ],
+)
+def test_instagram_script_payload_respects_html_boundaries(opening, closing):
+    # An unbalanced brace in a valid JSON string defeats the old object fallback.
+    target = {
+        "code": "abc",
+        "caption": {"text": 'quoted "caption" with } and <tag>'},
+        "media_type": 1,
+    }
+    page = opening + json.dumps(target) + closing
+    page += '<script>{"code":"other","media_type":2}</script>'
+
+    payload = VideoDownloader._extract_instagram_target_payload(page, "abc")
+
+    assert payload is not None
+    assert json.loads(payload) == target
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["content_type", "oversized", "tiny", "http_retry", "http_final", "network"],
+)
+def test_photo_failures_do_not_log_signed_urls_or_exception_details(tmp_path, caplog, failure):
+    d = make_d(tmp_path)
+    image_url = "https://cdn.example/private-photo.jpg?token=sensitive-token"
+    if failure == "content_type":
+        response = _make_fake_resp("text/html")
+    elif failure == "oversized":
+        response = _make_fake_resp("image/jpeg", body=b"x" * 2048)
+    elif failure == "tiny":
+        response = _make_fake_resp("image/jpeg", body=b"x" * 100)
+    elif failure in {"http_retry", "http_final"}:
+        response = urllib.error.HTTPError(
+            image_url, 504 if failure == "http_retry" else 403, image_url, None, None
+        )
+    else:
+        response = urllib.error.URLError(image_url)
+
+    with (
+        patch("src.services.media_io.urllib.request.urlopen") as urlopen,
+        patch("src.services.media_io.time.sleep"),
+        patch("src.services.media_io.MAX_FILE_SIZE", 1024),
+    ):
+        if isinstance(response, Exception):
+            urlopen.side_effect = response
+        else:
+            urlopen.return_value = response
+        result = d._download_image_sync(image_url, str(tmp_path / "photo"))
+
+    assert result is None
+    assert caplog.records
+    assert "sensitive-token" not in caplog.text
+    assert "private-photo" not in caplog.text
+    if failure == "http_retry":
+        assert "HTTP 504" in caplog.text
+        assert urlopen.call_count == 3
+    elif failure == "network":
+        assert "URLError" in caplog.text
+        assert urlopen.call_count == 3
+    assert not list(tmp_path.glob("photo.*"))
 
 
 def _make_fake_resp(content_type, body=b"x" * 5000):

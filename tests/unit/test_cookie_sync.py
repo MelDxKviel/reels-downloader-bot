@@ -1,11 +1,52 @@
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
-from scripts.sync_cookies import build_install_script, upload_and_install
+from scripts.sync_cookies import ParamikoSSH, build_install_script, ssh_base, upload_and_install
+
+
+def test_system_ssh_requires_known_host_key(monkeypatch):
+    monkeypatch.setenv("DEPLOY_HOST", "server.example")
+    monkeypatch.setenv("DEPLOY_USER", "deploy")
+    monkeypatch.delenv("SSH_EXTRA_OPTS", raising=False)
+
+    assert "StrictHostKeyChecking=yes" in ssh_base()
+
+
+@pytest.mark.parametrize("failure", [None, "unknown host key", "host key mismatch"])
+def test_paramiko_checks_known_hosts_and_closes_rejected_connection(monkeypatch, failure):
+    monkeypatch.setenv("DEPLOY_HOST", "server.example")
+    monkeypatch.setenv("DEPLOY_USER", "deploy")
+    client = MagicMock()
+    reject_policy = object()
+    paramiko = SimpleNamespace(
+        SSHClient=lambda: client,
+        RejectPolicy=lambda: reject_policy,
+    )
+    monkeypatch.setitem(sys.modules, "paramiko", paramiko)
+    if failure:
+        client.connect.side_effect = RuntimeError(failure)
+        with pytest.raises(RuntimeError, match=failure):
+            ParamikoSSH()
+        client.close.assert_called_once()
+        client.exec_command.assert_not_called()
+    else:
+        transport = ParamikoSSH()
+        transport.close()
+        client.close.assert_called_once()
+    client.load_system_host_keys.assert_called_once_with()
+    client.set_missing_host_key_policy.assert_called_once_with(reject_policy)
+    assert [call[0] for call in client.mock_calls[:3]] == [
+        "load_system_host_keys",
+        "set_missing_host_key_policy",
+        "connect",
+    ]
 
 
 @pytest.mark.parametrize(
