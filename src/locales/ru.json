@@ -27,6 +27,7 @@
   "language.changed": "✅ Язык интерфейса переключён на <b>Русский</b>.",
   "language.unsupported": "❌ Этот язык не поддерживается.",
   "download.invalid_link_hint": "🤔 Похоже, вы хотели отправить ссылку, но она некорректна.\nПожалуйста, скопируйте полную ссылку на видео.",
+  "download.send_link_hint": "📎 Отправьте мне ссылку на видео с YouTube, Instagram, TikTok или X/Twitter.\nИспользуйте /help для получения справки.",
   "download.start_status": "⏳ Скачиваю с <b>{platform}</b>...\nЭто может занять некоторое время.",
   "download.failed": "❌ <b>Не удалось скачать</b>\n\nПричина: {reason}",
   "download.from_cache_status": "📤 Отправляю {media_label} из кэша...",

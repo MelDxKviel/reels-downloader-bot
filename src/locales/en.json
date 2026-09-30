@@ -27,6 +27,7 @@
   "language.changed": "✅ Interface language switched to <b>English</b>.",
   "language.unsupported": "❌ This language is not supported.",
   "download.invalid_link_hint": "🤔 Looks like you tried to send a link, but it's malformed.\nPlease copy the full video link.",
+  "download.send_link_hint": "📎 Send me a link to a video on YouTube, Instagram, TikTok or X/Twitter.\nUse /help for usage info.",
   "download.start_status": "⏳ Downloading from <b>{platform}</b>...\nThis may take a moment.",
   "download.failed": "❌ <b>Download failed</b>\n\nReason: {reason}",
   "download.from_cache_status": "📤 Sending {media_label} from cache...",
