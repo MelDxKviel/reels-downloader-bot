@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from html.parser import HTMLParser
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -33,6 +34,28 @@ from src.services.url_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _InstagramScriptParser(HTMLParser):
+    """Collect script bodies using HTML tag boundaries, preserving JSON escapes."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.scripts: list[str] = []
+        self._script_chunks: Optional[list[str]] = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if tag == "script":
+            self._script_chunks = []
+
+    def handle_data(self, data: str) -> None:
+        if self._script_chunks is not None:
+            self._script_chunks.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self._script_chunks is not None:
+            self.scripts.append("".join(self._script_chunks))
+            self._script_chunks = None
 
 
 class InstagramMixin:
@@ -307,7 +330,10 @@ class InstagramMixin:
                     except (ValueError, json.JSONDecodeError):
                         pass
 
-        json_sources = re.findall(r"<script[^>]*>(.*?)</script>", probe, re.IGNORECASE | re.DOTALL)
+        parser = _InstagramScriptParser()
+        parser.feed(probe)
+        parser.close()
+        json_sources = parser.scripts
         stripped_probe = probe.strip()
         if stripped_probe[:1] in {"{", "["}:
             json_sources.append(stripped_probe)

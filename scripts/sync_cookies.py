@@ -311,7 +311,7 @@ def ssh_base() -> List[str]:
         args += ["-i", key]
     args += [
         "-o",
-        "StrictHostKeyChecking=accept-new",
+        "StrictHostKeyChecking=yes",
         "-o",
         "ConnectTimeout=15",
     ]
@@ -370,18 +370,22 @@ class ParamikoSSH(Transport):
 
         client = paramiko.SSHClient()
         client.load_system_host_keys()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
-            hostname=host,
-            port=port,
-            username=user,
-            password=password,
-            key_filename=key,
-            passphrase=passphrase,
-            allow_agent=use_keys,
-            look_for_keys=use_keys,
-            timeout=15,
-        )
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        try:
+            client.connect(
+                hostname=host,
+                port=port,
+                username=user,
+                password=password,
+                key_filename=key,
+                passphrase=passphrase,
+                allow_agent=use_keys,
+                look_for_keys=use_keys,
+                timeout=15,
+            )
+        except Exception:
+            client.close()
+            raise
         self._client = client
 
     def run(self, command: str, data: Optional[bytes] = None, timeout: int = 300):
