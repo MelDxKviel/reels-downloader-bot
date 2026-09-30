@@ -474,6 +474,24 @@ def test_instagram_product_photo_carousel_rejects_missing_child_image():
     assert VideoDownloader._instagram_product_to_media_info(product) is None
 
 
+def test_instagram_product_keeps_image_without_known_extension():
+    """image_versions2 entries are stills; never drop a child just because its
+    CDN filename lacks a Telegram-friendly extension (that would flatten the
+    slide count and disable the whole recovery)."""
+    url = "https://scontent.cdninstagram.com/v/t51/photo.heic"
+    product = {
+        "code": "abc",
+        "media_type": 1,
+        "image_versions2": {"candidates": [{"url": url, "width": 1080, "height": 1350}]},
+    }
+
+    result = VideoDownloader._instagram_product_to_media_info(product)
+
+    assert result is not None
+    assert result["image_urls"] == [url]
+    assert result["media_kind"] == "photo"
+
+
 def test_instagram_product_mixed_carousel_is_video_not_photo():
     cover = "https://scontent.cdninstagram.com/v/t51/cover.webp"
     product = {
@@ -1212,19 +1230,63 @@ def test_try_instagram_photo_reel_product_video_never_downloads_cover(tmp_path):
     download_image.assert_not_called()
 
 
-def test_try_instagram_photo_reel_without_product_does_not_trust_html_cover(tmp_path):
+def test_try_instagram_photo_reel_scrapes_shortcode_embed_without_product(tmp_path):
+    """A /reel/ photo post is recovered from the shortcode-scoped embed even
+    when the authenticated product API returns nothing."""
     d = make_d(tmp_path)
-    cookie_jar = MagicMock()
+    cover = '<meta property="og:image" content="https://scontent.cdninstagram.com/v/t51/photo.jpg">'
+
+    def fake_get(candidate, **_kwargs):
+        # A reel share link is probed through the scoped embed/mirror only; the
+        # raw main page is never consulted.
+        assert "/embed" in candidate or "kkinstagram" in candidate, candidate
+        return cover + '{"media_type": 1}'
 
     with (
-        patch.object(d, "_load_instagram_cookie_jar", return_value=cookie_jar),
+        patch.object(d, "_load_instagram_cookie_jar", return_value=MagicMock()),
         patch.object(d, "_fetch_instagram_product_info", return_value=None),
-        patch.object(d, "_http_get_html") as get_html,
+        patch.object(d, "_download_image_sync", return_value=str(fake_file(tmp_path, "reel.jpg"))),
+        patch.object(d, "_http_get_html", side_effect=fake_get),
+    ):
+        result = d._try_instagram_photo("https://www.instagram.com/reel/unknown/")
+
+    assert result is not None
+    assert result.is_photo
+    assert result.media_type_confirmed
+
+
+def test_try_instagram_photo_reel_bare_cover_stays_unconfirmed(tmp_path):
+    """A reel embed without a photo marker yields an unconfirmed result, so the
+    caller keeps the video error instead of leaking a square cover."""
+    d = make_d(tmp_path)
+    cover = '<meta property="og:image" content="https://scontent.cdninstagram.com/v/t51/cover.jpg">'
+    with (
+        patch.object(d, "_load_instagram_cookie_jar", return_value=MagicMock()),
+        patch.object(d, "_fetch_instagram_product_info", return_value=None),
+        patch.object(d, "_download_image_sync", return_value=str(fake_file(tmp_path, "cover.jpg"))),
+        patch.object(d, "_http_get_html", return_value=cover) as get_html,
+    ):
+        result = d._try_instagram_photo("https://www.instagram.com/reel/unknown/")
+
+    get_html.assert_called()
+    assert result is not None
+    assert result.media_type_confirmed is False
+
+
+def test_try_instagram_photo_reel_video_marker_is_never_a_photo(tmp_path):
+    d = make_d(tmp_path)
+    cover = '<meta property="og:image" content="https://scontent.cdninstagram.com/v/t51/cover.jpg">'
+    html = cover + '{"media_type":2,"video_versions":[{"url":"https://cdn/v.mp4"}]}'
+    with (
+        patch.object(d, "_load_instagram_cookie_jar", return_value=MagicMock()),
+        patch.object(d, "_fetch_instagram_product_info", return_value=None),
+        patch.object(d, "_download_image_sync") as download_image,
+        patch.object(d, "_http_get_html", return_value=html),
     ):
         result = d._try_instagram_photo("https://www.instagram.com/reel/unknown/")
 
     assert result is None
-    get_html.assert_not_called()
+    download_image.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1300,6 +1362,63 @@ async def test_instagram_no_formats_has_structured_error_without_exact_product(t
     assert not result.success
     assert result.error_code == "downloader.error.instagram_no_formats"
     photo_probe.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_download_reel_photo_recovers_from_scoped_embed_without_cookies(tmp_path):
+    """End-to-end: a cookie-less /reel/ photo post is recovered anonymously."""
+    d = make_d(tmp_path)
+    photo = fake_file(tmp_path, "reel-photo.jpg")
+    embed_html = (
+        '<meta property="og:image" '
+        'content="https://scontent.cdninstagram.com/v/t51/reel.jpg">'
+        '{"media_type": 1}'
+    )
+    with (
+        patch.object(d, "_load_instagram_cookie_jar", return_value=None),
+        patch.object(d, "_http_get_html", return_value=embed_html),
+        patch.object(d, "_download_image_sync", return_value=str(photo)),
+        patch.object(
+            d,
+            "_download_sync",
+            return_value=DownloadResult(
+                success=False, error_code="downloader.error.instagram_no_formats"
+            ),
+        ),
+    ):
+        result = await d.download("https://www.instagram.com/reel/reel-photo/")
+
+    assert result.success
+    assert result.is_photo
+    assert result.media_type_confirmed
+
+
+@pytest.mark.asyncio
+async def test_download_reel_unconfirmed_photo_files_are_discarded(tmp_path):
+    d = make_d(tmp_path)
+    cover = fake_file(tmp_path, "cover.jpg")
+    unconfirmed = DownloadResult(
+        success=True,
+        file_path=str(cover),
+        is_photo=True,
+        photo_paths=[str(cover)],
+        media_type_confirmed=False,
+    )
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=unconfirmed),
+        patch.object(
+            d,
+            "_download_sync",
+            return_value=DownloadResult(
+                success=False, error_code="downloader.error.instagram_no_formats"
+            ),
+        ),
+    ):
+        result = await d.download("https://www.instagram.com/reel/unknown/")
+
+    assert not result.success
+    assert result.error_code == "downloader.error.instagram_no_formats"
+    assert not cover.exists()
 
 
 @pytest.mark.asyncio

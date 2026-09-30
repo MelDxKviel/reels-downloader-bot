@@ -29,6 +29,7 @@ from src.services.media import (
 from src.services.url_utils import (
     build_kkinstagram_url,
     is_instagram_photo_candidate_url,
+    is_instagram_post_url,
     is_instagram_url,
     is_kkinstagram_url,
 )
@@ -200,23 +201,29 @@ class InstagramMixin:
                 image_versions.get("candidates") if isinstance(image_versions, dict) else None
             )
             ranked_images: list[tuple[int, str]] = []
+            fallback_images: list[tuple[int, str]] = []
             for candidate in candidates if isinstance(candidates, list) else []:
                 if not isinstance(candidate, dict):
                     continue
                 image_url = candidate.get("url")
                 if not isinstance(image_url, str):
                     continue
-                if os.path.splitext(urlparse(image_url).path)[1].lower() not in _IMAGE_EXTENSIONS:
-                    continue
                 try:
                     area = int(candidate.get("width") or 0) * int(candidate.get("height") or 0)
                 except (TypeError, ValueError):
                     area = 0
-                ranked_images.append((area, image_url))
-            if ranked_images:
+                fallback_images.append((area, image_url))
+                if os.path.splitext(urlparse(image_url).path)[1].lower() in _IMAGE_EXTENSIONS:
+                    ranked_images.append((area, image_url))
+            # ``image_versions2`` entries are stills by definition, so if none of
+            # them carries an extension Telegram understands, keep the largest
+            # anyway. Dropping the child would break the slide-count check below
+            # and disable the whole recovery for an otherwise valid photo post.
+            chosen_images = ranked_images or fallback_images
+            if chosen_images:
                 # Exactly one selected image per product child. Do not dedupe:
                 # repeated carousel slides are still distinct ordered items.
-                image_urls.append(max(ranked_images, key=lambda item: item[0])[1])
+                image_urls.append(max(chosen_images, key=lambda item: item[0])[1])
 
             if video_url is None:
                 versions = node.get("video_versions")
@@ -418,17 +425,23 @@ class InstagramMixin:
                 if product_media is not None:
                     return product_media
 
-        # /reel/, /reels/ and /tv/ remain video by default. Only authoritative
-        # product metadata above may prove that such a share URL is photographic;
-        # unscoped HTML/og:image must never turn a failed video into its cover.
-        if not is_instagram_photo_candidate_url(url):
+        # Only single-post URLs can be probed for photos. The shortcode-scoped
+        # /embed/ page is safe for every post type, including /reel/, /reels/ and
+        # /tv/ share links, because it is resolved from the target code itself.
+        # Those share links otherwise stay video by default, so for them we never
+        # consult the main page (its JSON can carry recommendation thumbnails).
+        # A genuine video reel still exposes media_type=2/video_versions markers,
+        # and the caller rejects any result whose ``has_video`` marker is set.
+        if not is_instagram_post_url(url):
             return None
 
         candidates: list[str] = []
         if shortcode:
             candidates.append(f"https://www.instagram.com/p/{shortcode}/embed/captioned")
             candidates.append(f"https://www.instagram.com/p/{shortcode}/embed/")
-        candidates.append(url)
+        if is_instagram_photo_candidate_url(url):
+            # Only /p/<code> may fall back to the main page / raw URL scrape.
+            candidates.append(url)
         kk = build_kkinstagram_url(url)
         if kk and kk not in candidates:
             candidates.append(kk)
