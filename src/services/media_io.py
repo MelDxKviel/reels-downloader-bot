@@ -126,6 +126,8 @@ class MediaIOMixin:
         Скачивает картинку по прямой ссылке и сохраняет её рядом с output_base,
         выбирая расширение по Content-Type или URL. Возвращает путь к файлу или None.
         """
+        # CDN URLs and exception messages can contain signed tokens or session data.
+        # Keep diagnostics to status codes, sizes, retry delays and exception types.
         for retry_index in range(3):
             output_path: Optional[str] = None
             try:
@@ -139,11 +141,7 @@ class MediaIOMixin:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     content_type = (resp.headers.get("Content-Type") or "").lower()
                     if not content_type.startswith("image/"):
-                        logger.warning(
-                            "Отбрасываю фото %s: Content-Type %r не является image/*",
-                            image_url,
-                            content_type,
-                        )
+                        logger.warning("Отбрасываю фото: Content-Type не является image/*")
                         return None
                     if "jpeg" in content_type or "jpg" in content_type:
                         ext = "jpg"
@@ -174,9 +172,8 @@ class MediaIOMixin:
                                 except OSError:
                                     pass
                                 logger.warning(
-                                    "Image exceeds MAX_FILE_SIZE (%s bytes), aborted: %s",
+                                    "Image exceeds MAX_FILE_SIZE (%s bytes), aborted",
                                     total,
-                                    image_url,
                                 )
                                 return None
                             file.write(chunk)
@@ -186,8 +183,7 @@ class MediaIOMixin:
                         except OSError:
                             pass
                         logger.warning(
-                            "Отбрасываю фото %s: слишком маленький файл (%s байт)",
-                            image_url,
+                            "Отбрасываю фото: слишком маленький файл (%s байт)",
                             total,
                         )
                         return None
@@ -202,14 +198,13 @@ class MediaIOMixin:
                 if is_transient and retry_index < 2:
                     delay = _download_retry_delay(retry_index)
                     logger.warning(
-                        "Временная HTTP %s при загрузке фото, повтор через %ss: %s",
+                        "Временная HTTP %s при загрузке фото, повтор через %ss",
                         exc.code,
                         delay,
-                        image_url,
                     )
                     time.sleep(delay)
                     continue
-                logger.warning("Не удалось скачать фото %s: %s", image_url, exc)
+                logger.warning("Не удалось скачать фото: HTTP %s", exc.code)
                 return None
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 if output_path:
@@ -220,14 +215,13 @@ class MediaIOMixin:
                 if retry_index < 2:
                     delay = _download_retry_delay(retry_index)
                     logger.warning(
-                        "Временная ошибка загрузки фото, повтор через %ss (%s): %s",
+                        "Временная ошибка загрузки фото, повтор через %ss (%s)",
                         delay,
-                        exc,
-                        image_url,
+                        type(exc).__name__,
                     )
                     time.sleep(delay)
                     continue
-                logger.warning("Не удалось скачать фото %s: %s", image_url, exc)
+                logger.warning("Не удалось скачать фото: %s", type(exc).__name__)
                 return None
         return None
 
