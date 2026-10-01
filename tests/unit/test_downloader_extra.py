@@ -341,6 +341,26 @@ def test_http_get_html_success():
     assert result == "<html></html>"
 
 
+def test_http_get_html_sends_navigation_header():
+    """Instagram only returns the media JSON for top-level navigations.
+
+    The request must advertise ``Sec-Fetch-Mode: navigate`` (as yt-dlp does);
+    without it the same URL yields a stripped shell with no product JSON.
+    """
+    fake = MagicMock()
+    fake.headers = {"Content-Type": "text/html"}
+    fake.read = MagicMock(return_value=b"<html></html>")
+    fake.__enter__ = MagicMock(return_value=fake)
+    fake.__exit__ = MagicMock(return_value=False)
+    with (
+        patch("src.services.instagram.urllib.request.Request") as request_cls,
+        patch("src.services.instagram.urllib.request.urlopen", return_value=fake),
+    ):
+        VideoDownloader._http_get_html("https://x")
+    headers = request_cls.call_args.kwargs["headers"]
+    assert headers["Sec-Fetch-Mode"] == "navigate"
+
+
 # ── _fetch_instagram_media_info ─────────────────────────────────────────────
 
 
@@ -600,6 +620,122 @@ def test_fetch_instagram_media_info_ignores_main_page_auxiliary_media(tmp_path):
     assert result["has_video"] is False
     assert result["media_kind"] == "photo"
     assert result["image_urls"] == [target]
+
+
+def _polaris_single_photo(code: str, url: str) -> str:
+    """Logged-out post JSON: a single item wrapped in ``if_not_gated_logged_out``."""
+    return json.dumps(
+        {
+            "__typename": "XIGPolarisImageMedia",
+            "code": code,
+            "if_not_gated_logged_out": {
+                "code": code,
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [{"url": url, "width": 1080, "height": 1920}]
+                },
+            },
+        }
+    )
+
+
+def _polaris_photo_carousel(code: str, urls: list[str]) -> str:
+    """Logged-out post JSON: a carousel exposing ``carousel_media`` at top level."""
+    return json.dumps(
+        {
+            "__typename": "XIGPolarisCarouselMedia",
+            "code": code,
+            "media_type": 8,
+            "carousel_media": [
+                {
+                    "media_type": 1,
+                    "image_versions2": {
+                        "candidates": [{"url": url, "width": 1080, "height": 1350}]
+                    },
+                }
+                for url in urls
+            ],
+        }
+    )
+
+
+def test_instagram_target_product_media_unwraps_logged_out_wrapper():
+    payload = _polaris_single_photo(
+        "abc", "https://scontent.cdninstagram.com/v/t51/photo.jpg"
+    )
+    info = VideoDownloader._instagram_target_product_media(payload)
+    assert info is not None
+    assert info["media_kind"] == "photo"
+    assert info["has_video"] is False
+    assert info["image_urls"] == ["https://scontent.cdninstagram.com/v/t51/photo.jpg"]
+
+
+def test_instagram_target_product_media_rejects_non_json():
+    assert VideoDownloader._instagram_target_product_media(None) is None
+    assert VideoDownloader._instagram_target_product_media("not json") is None
+
+
+def test_fetch_instagram_media_info_target_payload_beats_stray_video_marker(tmp_path):
+    """The requested post's own JSON decides the media kind.
+
+    The post is a single photo, but the surrounding page JSON also carries an
+    unrelated ``media_type: 2`` entry (recommendations). The structured target
+    payload must win, so the photo is not misreported as a video.
+    """
+    d = make_d(tmp_path)
+    photo = "https://scontent.cdninstagram.com/v/t51/photo.jpg"
+    main_html = json.dumps(
+        {
+            "code": "abc",
+            "if_not_gated_logged_out": {
+                "code": "abc",
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [{"url": photo, "width": 1080, "height": 1920}]
+                },
+            },
+            "recommendations": [
+                {"media_type": 2, "video_versions": [{"url": "https://cdn/x.mp4"}]}
+            ],
+        }
+    )
+
+    def fake_get(candidate, **_kwargs):
+        if "/embed" in candidate:
+            return None
+        if urlparse(candidate).hostname == "www.instagram.com":
+            return main_html
+        return None
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result is not None
+    assert result["has_video"] is False
+    assert result["media_kind"] == "photo"
+    assert photo in result["image_urls"]
+
+
+def test_fetch_instagram_media_info_target_payload_carousel_keeps_order(tmp_path):
+    d = make_d(tmp_path)
+    first = "https://scontent.cdninstagram.com/v/t51/a.jpg"
+    second = "https://scontent.cdninstagram.com/v/t51/b.jpg"
+    main_html = _polaris_photo_carousel("abc", [first, second])
+
+    def fake_get(candidate, **_kwargs):
+        if "/embed" in candidate:
+            return None
+        if urlparse(candidate).hostname == "www.instagram.com":
+            return main_html
+        return None
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result is not None
+    assert result["media_kind"] == "photo"
+    assert result["has_video"] is False
+    assert result["image_urls"] == [first, second]
 
 
 def test_fetch_instagram_media_info_aggregates_multiple_endpoints(tmp_path):

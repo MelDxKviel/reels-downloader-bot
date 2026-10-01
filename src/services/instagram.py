@@ -401,6 +401,34 @@ class InstagramMixin:
         best = max(target_nodes, key=completeness)
         return json.dumps(best, ensure_ascii=False)
 
+    @classmethod
+    def _instagram_target_product_media(cls, target_payload: Optional[str]) -> Optional[dict]:
+        """Classify a target-scoped Polaris product payload into media info.
+
+        Current Instagram post pages embed the requested post's product JSON.
+        A single item is wrapped in ``if_not_gated_logged_out`` while a carousel
+        exposes its fields (``media_type``, ``carousel_media``) at the top level,
+        so unwrap before classifying. Using this structured payload keeps the
+        media kind and the ordered slides authoritative to the requested post,
+        instead of scanning unrelated page JSON (which can contain a stray
+        ``media_type: 2`` and misreport a photo as a video).
+        """
+
+        if not target_payload:
+            return None
+        try:
+            node = json.loads(target_payload)
+        except (ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(node, dict):
+            return None
+        for key in ("if_not_gated_logged_out", "if_gated_logged_out"):
+            nested = node.get(key)
+            if isinstance(nested, dict):
+                node = nested
+                break
+        return cls._instagram_product_to_media_info(node)
+
     def _fetch_instagram_media_info(self, url: str) -> Optional[dict]:
         """
         Запрашивает Instagram-пост и собирает список изображений (для поддержки
@@ -470,7 +498,23 @@ class InstagramMixin:
             )
             is_target_main = target_payload is not None
             is_trusted_target = is_target_embed or is_target_main or is_target_mirror
-            parsed = self._parse_instagram_html(target_payload or html)
+            # The requested post's own product JSON is authoritative: derive the
+            # media kind, slide order and video flag from it directly. Only fall
+            # back to the regex scan when the payload is absent or unclassifiable,
+            # since the full page JSON also carries unrelated recommendations.
+            parsed = None
+            if is_target_main:
+                structured = self._instagram_target_product_media(target_payload)
+                if structured is not None:
+                    parsed = {
+                        "image_urls": structured["image_urls"],
+                        "video_url": structured["video_url"],
+                        "has_video_marker": structured["has_video"],
+                        "media_kind": structured["media_kind"],
+                        "title": structured["title"],
+                    }
+            if parsed is None:
+                parsed = self._parse_instagram_html(target_payload or html)
             if is_target_embed:
                 image_urls = trusted_image_urls
             elif is_target_main:
@@ -548,6 +592,13 @@ class InstagramMixin:
                             "image/webp,*/*;q=0.8"
                         ),
                         "Accept-Language": "en-US,en;q=0.9",
+                        # Instagram serves the full document (with the embedded
+                        # Polaris product JSON) only for requests that look like a
+                        # top-level browser navigation. Without this header the
+                        # same URL returns a stripped SPA shell with no media
+                        # JSON, which is what silently broke photo/carousel
+                        # recovery. yt-dlp sends the equivalent header.
+                        "Sec-Fetch-Mode": "navigate",
                     },
                 )
                 if cookie_jar is not None:
