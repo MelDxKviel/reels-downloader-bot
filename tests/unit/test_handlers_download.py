@@ -12,12 +12,12 @@ from src.services.i18n import Translator
 from ._helpers import make_db, make_message, make_status_message
 
 
-# @pytest.mark.asyncio
-# async def test_handle_url_no_link_hint():
-#     msg = make_message("just some text")
-#     db = make_db()
-#     await dl.handle_url(msg, db, Translator("en"))
-#     msg.answer.assert_awaited()
+@pytest.mark.asyncio
+async def test_handle_url_no_link_hint():
+    msg = make_message("just some text")
+    db = make_db()
+    await dl.handle_url(msg, db, Translator("en"))
+    msg.answer.assert_awaited()
 
 
 @pytest.mark.asyncio

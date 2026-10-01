@@ -23,7 +23,7 @@
   "cache.button_max_age": "⏳ Keep for: {age}",
   "cache.age.hours": "{value}h",
   "cache.age.days": "{value}d",
-  "language.choose": "🌐 <b>Choose interface goddamn you all language:</b>",
+  "language.choose": "🌐 <b>Choose interface language:</b>",
   "language.changed": "✅ Interface language switched to <b>English</b>.",
   "language.unsupported": "❌ This language is not supported.",
   "download.invalid_link_hint": "🤔 Looks like you tried to send a link, but it's malformed.\nPlease copy the full video link.",
