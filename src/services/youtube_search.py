@@ -143,7 +143,7 @@ async def search_shorts(
             user_id, lambda: run_search_worker(downloader.download_dir, query, count)
         )
         return [ShortsSearchResult(**item) for item in raw]
-    except (JobQueueFull, TimeoutError):
+    except JobQueueFull, TimeoutError:
         logger.info("Shorts search skipped: queue full or deadline exceeded")
         return []
 

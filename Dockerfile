@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14.8-slim
 
 # Устанавливаем системные зависимости
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -12,11 +12,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Рабочая директория
 WORKDIR /app
 
-# Копируем зависимости (lockfile создаём внутри образа, т.к. в репозитории его может не быть)
-COPY pyproject.toml ./
+# Копируем проверенные версии зависимостей
+COPY pyproject.toml uv.lock ./
 
-# Генерируем lock и устанавливаем зависимости
-RUN uv lock && uv sync --frozen --no-dev --no-install-project
+# Проверяем lockfile и используем Python базового образа без загрузки другого интерпретатора
+RUN uv sync --locked --no-dev --no-install-project --no-python-downloads
 
 # Копируем исходный код
 COPY src/ ./src/

@@ -4,13 +4,13 @@ This file provides guidance to coding agents working with this repository.
 
 ## Project Overview
 
-A Telegram bot that downloads videos from YouTube, Instagram Reels, TikTok, and X/Twitter using `yt-dlp`. Built with Python 3.11+, aiogram 3.x (async), SQLAlchemy async ORM, and PostgreSQL. Supports whitelist-based access control, per-user download statistics, format conversion (MP3, voice, GIF, video note), inline-mode downloads, and a bilingual interface (Russian / English) with per-user language preference.
+A Telegram bot that downloads videos from YouTube, Instagram Reels, TikTok, and X/Twitter using `yt-dlp`. Built with Python 3.14.8, aiogram 3.x (async), SQLAlchemy async ORM, and PostgreSQL. Supports whitelist-based access control, per-user download statistics, format conversion (MP3, voice, GIF, video note), inline-mode downloads, and a bilingual interface (Russian / English) with per-user language preference.
 
 ## Commands
 
 ```bash
 # Install dependencies
-uv sync
+uv sync --locked
 
 # Run locally
 uv run python -m src.main
@@ -31,6 +31,8 @@ docker compose -f docker-compose.local.yml up -d
 ```
 
 Schema is auto-created on startup via `Base.metadata.create_all()` — no migrations needed.
+
+Python 3.14.8 is pinned in `.python-version`, Docker and CI; Python 3.15 is excluded until the dependencies support it. `uv.lock` is versioned and must be kept in sync with `pyproject.toml`. Use `uv lock --upgrade-package <package>` for intentional dependency updates, then test and commit the lockfile. CI installs FFmpeg for media tests and runs `tests/smoke_runtime.py` inside the production image against a disposable PostgreSQL 17 database (`SMOKE_DATABASE_URL`).
 
 ## Architecture
 

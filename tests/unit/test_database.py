@@ -2,7 +2,7 @@
 Tests for DatabaseService using an in-memory SQLite database.
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -174,7 +174,7 @@ async def test_get_global_stats_empty(db_service):
 async def test_get_global_stats_with_since_filter(db_service):
     await db_service.record_download(101, "YouTube", "https://youtube.com/old", success=True)
 
-    future_since = datetime.utcnow() + timedelta(hours=1)
+    future_since = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
     stats = await db_service.get_global_stats(since=future_since)
     assert stats["total_downloads"] == 0
 

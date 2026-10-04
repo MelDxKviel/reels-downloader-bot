@@ -4,16 +4,21 @@ Thanks for your interest in contributing to Reels Downloader Bot.
 
 ## Development setup
 
-**Requirements:** Python 3.11+, [uv](https://docs.astral.sh/uv/), PostgreSQL, FFmpeg.
+**Requirements:** Python 3.14.8, a current [uv](https://docs.astral.sh/uv/), PostgreSQL, FFmpeg.
+The interpreter is pinned in `.python-version`; uv installs it automatically when needed.
 
 ```bash
 git clone https://github.com/meldxkviel/reels-downloader-bot.git
 cd reels-downloader-bot
-uv sync
+uv sync --locked
 cp .env.example .env  # fill in BOT_TOKEN, ADMIN_USERS, DATABASE_URL
-uv run alembic upgrade head
 uv run python -m src.main
 ```
+
+Keep `uv.lock` in version control. Update individual dependencies with
+`uv lock --upgrade-package <package>`, then `uv sync --locked` and run the checks.
+CI runs Python 3.14.8 tests with FFmpeg and Pillow, builds the production Docker image,
+and checks application imports and database operations against PostgreSQL 17.
 
 Alternatively, spin up the full stack with Docker:
 
@@ -40,16 +45,11 @@ Run both before committing. PRs with lint errors will not be merged.
 - **Access checks** are enforced in `UserAccessMiddleware` before any handler runs — handlers must not re-check access.
 - **Tests** live in `tests/unit/`. Run them with `uv run pytest tests/ -v --tb=short`. CI runs the same command on every PR — make sure tests pass locally before pushing.
 
-## Database migrations
+## Database schema
 
-When you change a SQLAlchemy model, generate and include a migration:
-
-```bash
-uv run alembic revision --autogenerate -m "short description"
-uv run alembic upgrade head
-```
-
-Commit the generated file in `alembic/versions/` alongside the model change.
+The schema is created at startup with `Base.metadata.create_all()`; Alembic migrations
+are not configured. This creates missing tables but does not alter existing columns.
+Changes to existing tables need an explicit migration plan.
 
 ## Submitting changes
 

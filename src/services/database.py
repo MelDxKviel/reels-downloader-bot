@@ -268,7 +268,7 @@ class DatabaseService:
             return default
         try:
             value = int(stored)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return default
         return value if value > 0 else default
 

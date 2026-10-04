@@ -546,7 +546,7 @@ async def cancel_admin(callback: CallbackQuery, state: FSMContext, t: Translator
     parts = callback.data.split(":")
     try:
         owner_id = int(parts[1])
-    except (IndexError, ValueError):
+    except IndexError, ValueError:
         await callback.answer()
         return
     btn_action = parts[2] if len(parts) > 2 else ""

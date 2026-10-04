@@ -3,7 +3,7 @@
 > A Telegram bot for downloading videos from YouTube, Instagram Reels, TikTok, and X (Twitter).  
 > Built with **aiogram 3.x** + **yt-dlp**, PostgreSQL statistics, and an access control system.
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.14.8-blue?logo=python&logoColor=white)
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)
 ![yt-dlp](https://img.shields.io/badge/yt--dlp-latest-red)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
@@ -125,16 +125,23 @@ INSTA_COOKIES_FILE_HOST_PATH=./instagram-cookies.txt  # Host path to Instagram c
 
 ## 💻 Local Setup (via uv)
 
+Python **3.14.8** is pinned in `.python-version`, Docker and CI. Use a current version
+of uv; it installs the selected interpreter automatically. Python 3.15 is not supported yet.
+
 ```bash
 # 1. Install uv (package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Install dependencies
-uv sync
+# 2. Install the locked dependencies (also recreates an older Python environment)
+uv sync --locked
 
 # 3. Start the bot (schema is created automatically on first run)
 uv run python -m src.main
 ```
+
+`uv.lock` is versioned and used by local setup, CI and Docker. To update a dependency,
+run `uv lock --upgrade-package yt-dlp` (replace the package name as needed), then
+`uv sync --locked`, run the tests and commit the updated lockfile.
 
 > 💡 Some video formats require **FFmpeg**. Without it, some downloads may fail (especially when audio and video streams need to be merged).  
 > Install: `sudo apt install ffmpeg` (Linux) or `brew install ffmpeg` (macOS).

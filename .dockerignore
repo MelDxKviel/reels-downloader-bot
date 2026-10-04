@@ -10,6 +10,7 @@ __pycache__
 .Python
 venv/
 .venv/
+.cache/
 *.egg-info/
 .eggs/
 dist/

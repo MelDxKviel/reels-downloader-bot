@@ -60,7 +60,7 @@ class TwitterMixin:
             return None
         try:
             data = json.loads(raw.decode("utf-8", errors="ignore"))
-        except (ValueError, json.JSONDecodeError):
+        except ValueError, json.JSONDecodeError:
             return None
         tweet = data.get("tweet") if isinstance(data, dict) else None
         if not isinstance(tweet, dict):

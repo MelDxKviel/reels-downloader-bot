@@ -82,7 +82,7 @@ class DownloadCacheMixin:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(temp_path, self.cache_file)
-        except (OSError, TypeError, ValueError):
+        except OSError, TypeError, ValueError:
             logger.exception("Could not persist media cache")
         finally:
             if temp_path and os.path.exists(temp_path):

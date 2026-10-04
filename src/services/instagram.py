@@ -210,7 +210,7 @@ class InstagramMixin:
                     continue
                 try:
                     area = int(candidate.get("width") or 0) * int(candidate.get("height") or 0)
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     area = 0
                 ranked_images.append((area, image_url))
             if ranked_images:
@@ -226,7 +226,7 @@ class InstagramMixin:
                         continue
                     try:
                         area = int(version.get("width") or 0) * int(version.get("height") or 0)
-                    except (TypeError, ValueError):
+                    except TypeError, ValueError:
                         area = 0
                     ranked_videos.append((area, version["url"]))
                 if ranked_videos:
@@ -327,7 +327,7 @@ class InstagramMixin:
                 if shortcode in stripped and stripped[:1] in {"{", "["}:
                     try:
                         visit(json.loads(stripped))
-                    except (ValueError, json.JSONDecodeError):
+                    except ValueError, json.JSONDecodeError:
                         pass
 
         parser = _InstagramScriptParser()
@@ -340,7 +340,7 @@ class InstagramMixin:
         for source in json_sources:
             try:
                 visit(json.loads(source.strip()))
-            except (ValueError, json.JSONDecodeError):
+            except ValueError, json.JSONDecodeError:
                 continue
 
         # Some pages wrap JSON in JavaScript assignments. Fall back to balanced
@@ -369,7 +369,7 @@ class InstagramMixin:
                         payload = probe[start : index + 1]
                         try:
                             node = json.loads(payload)
-                        except (ValueError, json.JSONDecodeError):
+                        except ValueError, json.JSONDecodeError:
                             continue
                         if isinstance(node, dict) and (
                             node.get("shortcode") == shortcode or node.get("code") == shortcode
@@ -720,7 +720,7 @@ class InstagramMixin:
         """Декодирует строковое значение из JSON (экранированное \\/ и \\uXXXX)."""
         try:
             return json.loads(f'"{raw}"')
-        except (ValueError, json.JSONDecodeError):
+        except ValueError, json.JSONDecodeError:
             return raw.replace("\\/", "/")
 
     @staticmethod

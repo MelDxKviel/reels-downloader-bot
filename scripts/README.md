@@ -11,7 +11,7 @@
 
 ## Требования
 
-- **Python 3.11+** и **yt-dlp** на твоей машине. Проще всего из корня проекта: `uv sync` (yt-dlp уже в зависимостях) и запускать через `uv run`.
+- **Python 3.14.8** и **yt-dlp** на твоей машине. Проще всего из корня проекта: `uv sync --locked` (uv использует `.python-version`, yt-dlp уже в зависимостях) и запускать через `uv run`.
 - Доступ к серверу по SSH (те же координаты, что у `DEPLOY_*` в [`.github/workflows/cd.yml`](../.github/workflows/cd.yml)):
   - **по ключу** (по умолчанию) — нужен **OpenSSH client** (`ssh`) в `PATH`. На Windows 11: *Settings → Apps → Optional Features → OpenSSH Client*.
   - **по паролю** — нужен пакет **paramiko** (см. [SSH по паролю](#ssh-по-паролю)).

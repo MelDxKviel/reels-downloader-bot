@@ -123,7 +123,7 @@ class VideoDownloader(
 
         try:
             return await jobs.run(user_id, convert)
-        except (JobQueueFull, TimeoutError):
+        except JobQueueFull, TimeoutError:
             logger.warning("Conversion rejected or deadline exceeded for user %s", user_id)
             return None
 

@@ -53,7 +53,7 @@ Users not in either group have all messages silently dropped by `UserAccessMiddl
 - **No rate limiting** — the bot does not limit how frequently an allowed user can trigger downloads. A whitelisted user can exhaust server resources or hit platform rate limits. Consider adding an external rate limiter if you expose the bot to many users.
 - **Local file storage** — downloaded files are stored on disk. Ensure the `DOWNLOAD_DIR` volume is not publicly accessible and has appropriate filesystem permissions.
 - **Cookie file validation** — cookie files are validated for format on startup, but their contents are not verified cryptographically. A tampered cookie file will cause download failures rather than a security incident.
-- **yt-dlp dependency** — this project relies on `yt-dlp`, a third-party library that executes platform-specific extraction code. Keep it updated (`uv sync --upgrade`) to pick up security and compatibility fixes.
+- **yt-dlp dependency** — this project relies on `yt-dlp`, a third-party library that executes platform-specific extraction code. Keep it updated (`uv lock --upgrade-package yt-dlp`, then `uv sync --locked`), test the change and commit `uv.lock` to pick up security and compatibility fixes in subsequent deployments.
 
 ## Out of Scope
 

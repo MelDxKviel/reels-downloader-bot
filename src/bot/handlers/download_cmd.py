@@ -176,7 +176,7 @@ async def cmd_download(
 async def cancel_download(callback: CallbackQuery, state: FSMContext, t: Translator) -> None:
     try:
         owner_id = int(callback.data.split(":", 1)[1])
-    except (IndexError, ValueError):
+    except IndexError, ValueError:
         await callback.answer()
         return
     if callback.from_user.id != owner_id:

@@ -240,21 +240,21 @@ class MediaIOMixin:
         def positive_int(value: object) -> Optional[int]:
             try:
                 number = int(value)
-            except (TypeError, ValueError, OverflowError):
+            except TypeError, ValueError, OverflowError:
                 return None
             return number if number > 0 else None
 
         def optional_float(value: object) -> Optional[float]:
             try:
                 number = float(value)
-            except (TypeError, ValueError, OverflowError):
+            except TypeError, ValueError, OverflowError:
                 return None
             return number if number >= 0 else None
 
         def signed_float(value: object) -> Optional[float]:
             try:
                 return float(value)
-            except (TypeError, ValueError, OverflowError):
+            except TypeError, ValueError, OverflowError:
                 return None
 
         info_dict = info if isinstance(info, dict) else {}

@@ -60,8 +60,8 @@ htmlcov/
 # mypy
 .mypy_cache/
 
-# uv
-uv.lock
+# Local tool caches (uv.lock is versioned)
+.cache/
 
 # OS
 .DS_Store

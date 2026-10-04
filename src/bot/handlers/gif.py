@@ -279,7 +279,7 @@ async def cancel_gif(callback: CallbackQuery, state: FSMContext, t: Translator) 
     """Отмена ожидания — только инициатор может отменить."""
     try:
         owner_id = int(callback.data.split(":", 1)[1])
-    except (IndexError, ValueError):
+    except IndexError, ValueError:
         await callback.answer()
         return
     if callback.from_user.id != owner_id:

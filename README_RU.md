@@ -3,7 +3,7 @@
 > Telegram-бот для скачивания видео с YouTube, Instagram Reels, TikTok и X (Twitter).  
 > Построен на **aiogram 3.x** + **yt-dlp**, с PostgreSQL-статистикой и системой управления доступом.
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.14.8-blue?logo=python&logoColor=white)
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)
 ![yt-dlp](https://img.shields.io/badge/yt--dlp-latest-red)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
@@ -123,16 +123,23 @@ INSTA_COOKIES_FILE_HOST_PATH=./cookies/instagram.txt  # Путь к Instagram co
 
 ## 💻 Запуск локально (через uv)
 
+Python **3.14.8** закреплён в `.python-version`, Docker и CI. Используй актуальную
+версию uv — она автоматически установит выбранный интерпретатор. Python 3.15 пока не поддерживается.
+
 ```bash
 # 1. Установите uv (менеджер пакетов)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Установите зависимости
-uv sync
+# 2. Установите закреплённые зависимости (окружение на старом Python будет пересоздано)
+uv sync --locked
 
 # 3. Запустите бота (схема БД создаётся автоматически при первом запуске)
 uv run python -m src.main
 ```
+
+`uv.lock` хранится в Git и используется локально, в CI и Docker. Для обновления
+зависимости выполни `uv lock --upgrade-package yt-dlp` (подставь нужный пакет), затем
+`uv sync --locked`, запусти тесты и включи обновлённый lockfile в коммит.
 
 > 💡 Для работы с некоторыми форматами требуется **FFmpeg**. Без него часть видео может не скачиваться (особенно когда нужна склейка аудио + видео).  
 > Установка: `sudo apt install ffmpeg` (Linux) или `brew install ffmpeg` (macOS).
