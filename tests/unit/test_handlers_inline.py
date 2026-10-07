@@ -486,7 +486,9 @@ async def test_chosen_inline_photo_carousel_edits_rich_message_with_file_ids(tmp
     ):
         await inline_h.chosen_inline_handler(cr, bot, db, Translator("en"))
 
-    download.assert_awaited_once_with(url, allow_carousel=True, reserve=True, user_id=100)
+    download.assert_awaited_once_with(
+        url, allow_carousel=True, reserve=True, user_id=100, quality="standard"
+    )
     upload_carousel.assert_awaited_once_with(bot, [str(path) for path in paths])
     assert bot.edit_message_text.await_count == 2
     sleep.assert_awaited_once_with(1.0)

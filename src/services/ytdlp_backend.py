@@ -8,6 +8,7 @@ import yt_dlp
 from yt_dlp.utils import DownloadError
 
 from src.config import MAX_FILE_SIZE
+from src.services.download_quality import DEFAULT_QUALITY, QUALITY_RESOLUTIONS, validate_quality
 from src.services.media import (
     _IMAGE_EXTENSIONS,
     _VIDEO_EXTENSIONS,
@@ -106,6 +107,22 @@ class YtDlpMixin:
         def is_http(value: object) -> bool:
             return isinstance(value, str) and value.startswith("http")
 
+        dimensions = [entry.get("width"), entry.get("height")]
+        selected_resolution = (
+            min(dimensions)
+            if all(isinstance(value, (int, float)) and value > 0 for value in dimensions)
+            else None
+        )
+        if (
+            want_video
+            and selected_resolution
+            and is_http(entry.get("url"))
+            and not entry.get("requested_formats")
+        ):
+            # yt-dlp already selected this progressive/silent source for the
+            # caller's profile. Rich URL fallbacks must retain that selection.
+            return entry["url"]
+
         best_url: Optional[str] = None
         best_score = -1.0
         formats = entry.get("formats")
@@ -119,6 +136,15 @@ class YtDlpMixin:
                 has_audio = acodec is not None and acodec != "none"
                 if want_video:
                     if not has_video:
+                        continue
+                    dimensions = [fmt.get("width"), fmt.get("height")]
+                    if (
+                        selected_resolution
+                        and all(
+                            isinstance(value, (int, float)) and value > 0 for value in dimensions
+                        )
+                        and min(dimensions) > selected_resolution
+                    ):
                         continue
                     # Прогрессивные (со звуком) форматы — вперёд, дальше по высоте.
                     score = (1_000_000.0 if has_audio else 0.0) + float(fmt.get("height") or 0)
@@ -169,20 +195,30 @@ class YtDlpMixin:
             return None
         return CarouselSlide(url=media_url, is_video=is_video)
 
-    def _get_ydl_opts(self, output_path: str, url: str) -> dict:
+    def _get_ydl_opts(self, output_path: str, url: str, *, quality: str = DEFAULT_QUALITY) -> dict:
         """Возвращает опции для yt-dlp."""
+        resolution = QUALITY_RESOLUTIONS[validate_quality(quality)]
+        size_filter = f"[filesize<=?{MAX_FILE_SIZE}]"
         if self.has_ffmpeg:
             fmt = (
-                "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]"
-                "/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+                f"bestvideo*{size_filter}+bestaudio{size_filter}"
+                f"/best{size_filter}/bestvideo*{size_filter}"
             )
             merge_format = "mp4"
         else:
-            fmt = "best[ext=mp4]/best"
+            fmt = (
+                f"best[ext=mp4]{size_filter}/best{size_filter}"
+                f"/bestvideo*[ext=mp4]{size_filter}/bestvideo*{size_filter}"
+            )
             merge_format = None
 
         opts = {
             "format": fmt,
+            # res uses the shorter side: 1080x1920 Reels count as 1080p.
+            # If the source has no format below the target, choose its smallest
+            # available resolution instead of transcoding inside the bot.
+            "format_sort": [f"res:{resolution}", "vcodec:h264", "ext:mp4:m4a"],
+            "format_sort_force": True,
             **({"merge_output_format": merge_format} if merge_format else {}),
             "outtmpl": output_path,
             "max_filesize": MAX_FILE_SIZE,

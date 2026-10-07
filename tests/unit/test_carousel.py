@@ -20,8 +20,8 @@ from src.services.downloader import CarouselSlide, DownloadResult, VideoDownload
 from src.services.url_utils import is_twitter_url
 
 
-async def _in_process_worker(downloader, url, allow_carousel):
-    return await downloader._download_source(url, allow_carousel)
+async def _in_process_worker(downloader, url, allow_carousel, *, quality="standard"):
+    return await downloader._download_source(url, allow_carousel, quality=quality)
 
 
 # ── _try_instagram_photo: carousel slide URLs ─────────────────────────────────

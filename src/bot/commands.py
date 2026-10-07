@@ -25,6 +25,7 @@ def admin_commands(t: Translator) -> List[BotCommand]:
     return user_commands(t) + [
         BotCommand(command="adduser", description=t("menu.adduser")),
         BotCommand(command="removeuser", description=t("menu.removeuser")),
+        BotCommand(command="hd", description=t("menu.hd")),
         BotCommand(command="users", description=t("menu.users")),
         BotCommand(command="stats", description=t("menu.stats")),
         BotCommand(command="userstats", description=t("menu.userstats")),

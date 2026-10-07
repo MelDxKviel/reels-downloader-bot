@@ -63,8 +63,9 @@ async def _download_and_send(
     await status_msg.edit_text(t("download.start_status", platform=platform))
 
     try:
+        quality = await db.get_user_download_quality(message.from_user.id)
         result: DownloadResult = await downloader.download(
-            url, user_id=message.from_user.id, reserve=True
+            url, user_id=message.from_user.id, reserve=True, quality=quality
         )
     except Exception as e:
         logger.error("Ошибка скачивания: %s", e, exc_info=True)
@@ -126,7 +127,7 @@ async def _download_and_send(
                     "sendVideo(user)",
                 )
                 if sent.video and sent.video.file_id:
-                    downloader.set_telegram_file_id(url, sent.video.file_id)
+                    downloader.set_telegram_file_id(url, sent.video.file_id, quality=quality)
             await status_msg.delete()
             await db.record_download(
                 user_id=message.from_user.id, platform=platform, url=url, success=True

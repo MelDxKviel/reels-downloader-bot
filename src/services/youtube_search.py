@@ -19,6 +19,7 @@ from typing import List, Optional
 import yt_dlp
 
 from src.services.download_jobs import JobQueueFull, jobs
+from src.services.download_quality import DEFAULT_QUALITY
 from src.services.download_worker import run_search_worker
 from src.services.downloader import downloader
 
@@ -153,6 +154,6 @@ def build_shorts_url(video_id: str) -> str:
     return f"https://www.youtube.com/shorts/{video_id}"
 
 
-def get_cached_video_file_id(video_id: str) -> Optional[str]:
+def get_cached_video_file_id(video_id: str, *, quality: str = DEFAULT_QUALITY) -> Optional[str]:
     """Если для этого шортса уже есть Telegram file_id — возвращает его."""
-    return downloader.get_telegram_file_id(build_shorts_url(video_id))
+    return downloader.get_telegram_file_id(build_shorts_url(video_id), quality=quality)

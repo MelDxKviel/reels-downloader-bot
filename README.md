@@ -219,11 +219,30 @@ Telegram will show a result card — select it and the media will be sent to the
 | Command | Description |
 |---|---|
 | `/adduser USER_ID` | Add a user (grant access) |
+| `/hd USER_ID 720` | Set HD quality up to 720p for this user |
+| `/hd USER_ID 1080` | Set Full HD quality up to 1080p for this user |
+| `/hd USER_ID off` | Return this user to standard quality (480p target) |
+| `/hd USER_ID` | Show the user's current quality profile |
 | `/removeuser USER_ID` | Remove a user (revoke access) |
 | `/users` | List all allowed users |
 | `/stats` | Overall bot statistics by platform |
 | `/userstats USER_ID` | Statistics for a specific user |
 | `/adminhelp` | Admin command reference |
+
+Quality profiles are stored in PostgreSQL and take effect on subsequent requests,
+including after a restart. Everyone (including admins) starts with the 480p target;
+use `/hd YOUR_ID 1080` to enable Full HD for yourself. Profiles apply to ordinary
+links, `/download`, inline video and Shorts. Source photos keep their existing
+quality, and MP3/voice/GIF/round conversions use the standard profile.
+
+The resolution target uses the shorter side, so portrait Instagram Reels at
+1080×1920 qualify as 1080p. The bot selects the best source format up to the target;
+when none is available below it, it uses the smallest available format without
+transcoding or upscaling. Known files over 50 MB are skipped during selection, and
+the final file is also checked against the 50 MB limit. Quality profiles have
+separate local media and Telegram file-ID caches. The existing queue, concurrency
+limits and download deadlines apply to HD as well. `/hd` does not grant bot access.
+The new `user_download_settings` table is created automatically on startup.
 
 ---
 
@@ -270,4 +289,3 @@ services:
 ```
 
 > ⚠️ Cookies are tied to a browser session and may expire — re-export them if you encounter auth errors.
-

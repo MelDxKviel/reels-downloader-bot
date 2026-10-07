@@ -72,7 +72,7 @@ def test_build_shorts_url():
 def test_get_cached_video_file_id_delegates_to_downloader():
     with patch.object(ys.downloader, "get_telegram_file_id", return_value="fid") as m:
         assert ys.get_cached_video_file_id("abc") == "fid"
-    m.assert_called_with("https://www.youtube.com/shorts/abc")
+    m.assert_called_with("https://www.youtube.com/shorts/abc", quality="standard")
 
 
 def _fake_ydl(info):

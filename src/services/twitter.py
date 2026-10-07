@@ -9,6 +9,7 @@ import uuid
 from typing import Optional
 from urllib.parse import urlparse
 
+from src.services.download_quality import DEFAULT_QUALITY
 from src.services.media import (
     BROWSER_USER_AGENT,
     MAX_CAROUSEL_ITEMS,
@@ -86,7 +87,9 @@ class TwitterMixin:
         caption = caption if isinstance(caption, str) and caption.strip() else None
         return slides, caption
 
-    def _try_twitter_carousel(self, url: str) -> Optional[DownloadResult]:
+    def _try_twitter_carousel(
+        self, url: str, *, quality: str = DEFAULT_QUALITY
+    ) -> Optional[DownloadResult]:
         """Download every slide of a Twitter carousel containing photos."""
         fetched = self._fetch_twitter_media(url)
         if fetched is None:
@@ -100,7 +103,9 @@ class TwitterMixin:
         for idx, slide in enumerate(slides):
             if slide.is_video:
                 output = str(self.download_dir / f"{batch_id}_{idx}_%(id)s.%(ext)s")
-                result = self._download_sync(slide.url, self._get_ydl_opts(output, slide.url))
+                result = self._download_sync(
+                    slide.url, self._get_ydl_opts(output, slide.url, quality=quality)
+                )
                 path = result.file_path if result.success and not result.is_photo else None
                 if path:
                     slide.width, slide.height, slide.duration = (

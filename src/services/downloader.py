@@ -13,6 +13,7 @@ from src.config import DOWNLOAD_DIR, DOWNLOAD_TIMEOUT
 from src.services.cookies import CookieMixin
 from src.services.download_cache import DownloadCacheMixin
 from src.services.download_jobs import JobQueueFull, jobs
+from src.services.download_quality import DEFAULT_QUALITY, validate_quality
 from src.services.download_worker import run_download_worker
 from src.services.instagram import InstagramMixin
 from src.services.media import _MEDIA_CACHE_VERSION as _MEDIA_CACHE_VERSION
@@ -63,20 +64,24 @@ class VideoDownloader(
         *,
         user_id: int | None = None,
         reserve: bool = False,
+        quality: str = DEFAULT_QUALITY,
     ) -> DownloadResult:
-        """Bounded downloads; cached requests for the same URL share one worker."""
+        """Bounded downloads; the same URL and quality share one worker."""
+        validate_quality(quality)
         if not is_supported_url(url):
             return DownloadResult(success=False, error_code="downloader.error.unsupported_url")
         if not allow_carousel:
-            return await self._run_download(url, allow_carousel=False, user_id=user_id)
-        cached = self.get_from_cache(url, reserve=reserve)
+            return await self._run_download(
+                url, allow_carousel=False, user_id=user_id, quality=quality
+            )
+        cached = self.get_from_cache(url, reserve=reserve, quality=quality)
         if cached is not None:
             return cached
-        key = self._get_url_hash(url)
+        key = self._get_url_hash(url, quality=quality)
         job = self._inflight.get(key)
         if job is None:
             task = asyncio.create_task(
-                self._run_download(url, allow_carousel=True, user_id=user_id)
+                self._run_download(url, allow_carousel=True, user_id=user_id, quality=quality)
             )
             job = {"task": task, "waiters": 0}
             self._inflight[key] = job
@@ -90,7 +95,7 @@ class VideoDownloader(
                     if reserve:
                         self.reserve_result(result)
                     # A cleanup may have run while the worker was active.
-                    self.add_to_cache(url, result)
+                    self.add_to_cache(url, result, quality=quality)
             return result
         finally:
             job["waiters"] -= 1
@@ -108,11 +113,15 @@ class VideoDownloader(
                     # retain its successful result rather than leaving orphan files.
                     result = task.result()
                     if result.success and key not in self.cache:
-                        self.add_to_cache(url, result)
+                        self.add_to_cache(url, result, quality=quality)
 
-    async def _run_download(self, url: str, *, allow_carousel: bool, user_id: int | None):
+    async def _run_download(
+        self, url: str, *, allow_carousel: bool, user_id: int | None, quality: str
+    ):
         try:
-            return await jobs.run(user_id, lambda: self._worker_runner(self, url, allow_carousel))
+            return await jobs.run(
+                user_id, lambda: self._worker_runner(self, url, allow_carousel, quality=quality)
+            )
         except JobQueueFull:
             return DownloadResult(success=False, error_code="downloader.error.busy")
 
@@ -127,7 +136,9 @@ class VideoDownloader(
             logger.warning("Conversion rejected or deadline exceeded for user %s", user_id)
             return None
 
-    async def _download_source(self, url: str, allow_carousel: bool = True) -> DownloadResult:
+    async def _download_source(
+        self, url: str, allow_carousel: bool = True, *, quality: str = DEFAULT_QUALITY
+    ) -> DownloadResult:
         """Скачивает видео по URL.
 
         ``allow_carousel`` — собирать ли rich-карусели и использовать общий
@@ -137,6 +148,7 @@ class VideoDownloader(
         всё равно возвращается как фото, а неоднозначная обложка проверяется
         через yt-dlp прежде, чем может стать фото-фолбэком.
         """
+        validate_quality(quality)
         if not is_supported_url(url):
             return DownloadResult(
                 success=False,
@@ -173,7 +185,7 @@ class VideoDownloader(
         # одиночные твиты вернут None и пойдут обычным yt-dlp-путём ниже.
         if allow_carousel and is_twitter_url(url):
             twitter_result = await loop.run_in_executor(
-                None, lambda: self._try_twitter_carousel(url)
+                None, lambda: self._try_twitter_carousel(url, quality=quality)
             )
             if twitter_result is not None:
                 return twitter_result
@@ -182,7 +194,7 @@ class VideoDownloader(
         # ``%(id)s`` prevents playlist/carousel entries with the same extension
         # from overwriting one another (e.g. every Instagram slide as uuid.jpg).
         output_path = str(self.download_dir / f"{file_id}_%(id)s.%(ext)s")
-        ydl_opts = self._get_ydl_opts(output_path, url)
+        ydl_opts = self._get_ydl_opts(output_path, url, quality=quality)
 
         try:
             result = await loop.run_in_executor(None, lambda: self._download_sync(url, ydl_opts))

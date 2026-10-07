@@ -13,6 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from src.config import DOWNLOAD_TIMEOUT
+from src.services.download_quality import DEFAULT_QUALITY, validate_quality
 from src.services.media import CarouselSlide, DownloadResult
 from src.services.process_tree import WindowsProcessJob
 
@@ -111,12 +112,21 @@ async def run_worker(request: dict, directory: Path, *, timeout=DOWNLOAD_TIMEOUT
             raise asyncio.CancelledError
 
 
-async def run_download_worker(service, url: str, allow_carousel: bool) -> DownloadResult:
+async def run_download_worker(
+    service, url: str, allow_carousel: bool, *, quality: str = DEFAULT_QUALITY
+) -> DownloadResult:
+    validate_quality(quality)
     directory = Path(tempfile.mkdtemp(prefix="job-", dir=service.download_dir)).resolve()
     keep: set[Path] = set()
     try:
         raw = await run_worker(
-            {"operation": "download", "url": url, "allow_carousel": allow_carousel}, directory
+            {
+                "operation": "download",
+                "url": url,
+                "allow_carousel": allow_carousel,
+                "quality": quality,
+            },
+            directory,
         )
         if raw.get("carousel_slides"):
             raw["carousel_slides"] = [CarouselSlide(**item) for item in raw["carousel_slides"]]
@@ -171,7 +181,11 @@ async def _main(result_path: Path) -> None:
         from src.services.downloader import VideoDownloader
 
         service = VideoDownloader(str(result_path.parent))
-        media = await service._download_source(request["url"], request["allow_carousel"])
+        media = await service._download_source(
+            request["url"],
+            request["allow_carousel"],
+            quality=request.get("quality", DEFAULT_QUALITY),
+        )
         # FFmpeg stays inside the isolated worker and its hard process-tree deadline.
         if request["allow_carousel"]:
             service._prepare_video_previews(media)

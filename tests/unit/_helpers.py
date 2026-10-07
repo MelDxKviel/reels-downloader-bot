@@ -110,6 +110,8 @@ def make_db():
     db.record_download = AsyncMock()
     db.get_user_language = AsyncMock(return_value=None)
     db.set_user_language = AsyncMock(return_value=True)
+    db.get_user_download_quality = AsyncMock(return_value="standard")
+    db.set_user_download_quality = AsyncMock()
     db.get_setting = AsyncMock(return_value=None)
     db.set_setting = AsyncMock()
     db.is_feature_enabled = AsyncMock(return_value=False)

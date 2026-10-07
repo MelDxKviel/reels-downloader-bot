@@ -157,9 +157,10 @@ async def handle_url(message: Message, db: DatabaseService, t: Translator) -> No
 
     result = None
     try:
+        quality = await db.get_user_download_quality(message.from_user.id)
         # Reserve cached media until every Telegram upload finishes.
         result: DownloadResult = await downloader.download(
-            url, user_id=message.from_user.id, reserve=True
+            url, user_id=message.from_user.id, reserve=True, quality=quality
         )
 
         if not result.success:
@@ -226,7 +227,7 @@ async def handle_url(message: Message, db: DatabaseService, t: Translator) -> No
                 )
                 # Сохраняем Telegram file_id, чтобы inline-режим отдавал видео моментально
                 if sent.video and sent.video.file_id:
-                    downloader.set_telegram_file_id(url, sent.video.file_id)
+                    downloader.set_telegram_file_id(url, sent.video.file_id, quality=quality)
 
         # Удаляем сообщение о статусе
         await status_message.delete()

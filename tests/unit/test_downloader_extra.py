@@ -14,10 +14,10 @@ import pytest
 from src.services.downloader import DownloadResult, VideoDownloader
 
 
-async def _in_process_worker(service, url, allow_carousel):
+async def _in_process_worker(service, url, allow_carousel, *, quality="standard"):
     # Source orchestration unit tests replace external backends in this process.
     # Separate worker integration tests exercise production process isolation.
-    return await service._download_source(url, allow_carousel)
+    return await service._download_source(url, allow_carousel, quality=quality)
 
 
 def make_d(tmp_path: Path) -> VideoDownloader:
@@ -1469,7 +1469,7 @@ async def test_download_sync_unfound_file_via_find(tmp_path):
 
     # The opts passed in are mutated when the test FakeYDL runs.
     # We need outtmpl to give file_id matching file. Bypass via patching _get_ydl_opts.
-    def fake_opts(out_path, u):
+    def fake_opts(out_path, u, *, quality="standard"):
         return {"outtmpl": str(tmp_path / f"{file_id}.%(ext)s"), "format": "best"}
 
     with patch.object(d, "_get_ydl_opts", side_effect=fake_opts):
@@ -1501,7 +1501,7 @@ async def test_download_sync_no_file_found_at_all(tmp_path):
         def prepare_filename(self, info):
             return str(tmp_path / "missing.mp4")
 
-    def fake_opts(out_path, u):
+    def fake_opts(out_path, u, *, quality="standard"):
         return {"outtmpl": str(tmp_path / "missing.%(ext)s"), "format": "best"}
 
     with patch.object(d, "_get_ydl_opts", side_effect=fake_opts):
@@ -1535,7 +1535,7 @@ async def test_download_sync_outtmpl_dict_form(tmp_path):
         def prepare_filename(self, info):
             return str(tmp_path / f"{file_id}.unknownext")
 
-    def fake_opts(out_path, u):
+    def fake_opts(out_path, u, *, quality="standard"):
         return {
             "outtmpl": {"default": str(tmp_path / f"{file_id}.%(ext)s")},
             "format": "best",
@@ -1832,7 +1832,7 @@ async def test_download_sync_outtmpl_empty(tmp_path):
         def prepare_filename(self, info):
             return None
 
-    def fake_opts(out_path, u):
+    def fake_opts(out_path, u, *, quality="standard"):
         return {"outtmpl": "", "format": "best"}
 
     with patch.object(d, "_get_ydl_opts", side_effect=fake_opts):
@@ -1865,7 +1865,7 @@ async def test_download_cookie_retry_then_fails(tmp_path):
 
         original = d._get_ydl_opts
 
-        def patched(output_path, u):
+        def patched(output_path, u, *, quality="standard"):
             opts = original(output_path, u)
             opts["cookiefile"] = "/fake/c.txt"
             return opts
@@ -2080,7 +2080,7 @@ async def test_download_sync_outtmpl_dict_in_else_branch(tmp_path):
         def prepare_filename(self, info):
             return None  # forces else branch
 
-    def fake_opts(out_path, u):
+    def fake_opts(out_path, u, *, quality="standard"):
         return {
             "outtmpl": {"default": str(tmp_path / f"{file_id}.%(ext)s")},
             "format": "best",

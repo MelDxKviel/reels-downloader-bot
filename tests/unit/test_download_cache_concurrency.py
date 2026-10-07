@@ -27,7 +27,7 @@ async def test_concurrent_downloads_share_worker_and_keep_both_delivery_leases(
     video = tmp_path / "video.mp4"
     photo = tmp_path / "photo.jpg"
 
-    async def runner(downloader, url, allow_carousel):
+    async def runner(downloader, url, allow_carousel, *, quality="standard"):
         calls.append((url, allow_carousel))
         started.set()
         await finish.wait()
@@ -49,9 +49,9 @@ async def test_concurrent_downloads_share_worker_and_keep_both_delivery_leases(
     original_add = downloader.add_to_cache
     published = 0
 
-    def publish(url, result):
+    def publish(url, result, *, quality="standard"):
         nonlocal published
-        original_add(url, result)
+        original_add(url, result, quality=quality)
         published += 1
         if clear_after_first_publish and published == 1:
             # The first delivery owns a lease; the second subscriber still has

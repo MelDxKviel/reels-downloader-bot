@@ -12,10 +12,10 @@ _INSTAGRAM_SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstu
 _IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".mkv", ".m4v"})
 
-# Older entries/file IDs lack explicit video previews (or have legacy photo data).
+# Older entries/file IDs lack quality profiles (or have legacy preview/photo data).
 # Discard them lazily so Telegram does not keep serving a broken auto-thumbnail;
 # unrelated MP3 file IDs survive.
-_MEDIA_CACHE_VERSION = 5
+_MEDIA_CACHE_VERSION = 6
 
 
 def _download_retry_delay(n: int) -> float:

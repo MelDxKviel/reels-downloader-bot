@@ -26,6 +26,7 @@ from src.config import (
     CACHE_MAX_AGE_PRESETS,
 )
 from src.services.database import DatabaseService, _utcnow
+from src.services.download_quality import DEFAULT_QUALITY
 from src.services.downloader import downloader
 from src.services.i18n import Translator
 
@@ -138,6 +139,8 @@ async def _build_userstats_text(db: DatabaseService, bot: Bot, t: Translator, us
         user_info_lines.append(t("admin.userstats.username", username=html.escape(username)))
     user_info_lines.append(t("admin.userstats.added", date=created))
     user_info_lines.append(t("admin.userstats.last_active", date=last_active_str))
+    quality = await db.get_user_download_quality(user_id)
+    user_info_lines.append(t("admin.hd.quality", quality=t(f"admin.hd.profile.{quality}")))
 
     text = (
         t("admin.userstats.title")
@@ -172,6 +175,42 @@ def _short_user_label(
     if len(name) > 24:
         name = name[:23] + "…"
     return f"📊 #{idx} {name}"
+
+
+@router.message(Command("hd"))
+async def cmd_hd(message: Message, db: DatabaseService, t: Translator, state: FSMContext) -> None:
+    """Inspect or assign a user's persistent HD profile."""
+    if not is_admin(message.from_user.id):
+        await message.answer(t("admin.only"))
+        return
+
+    args = (message.text or "").split()
+    if len(args) not in {2, 3}:
+        await message.answer(t("admin.hd.usage"))
+        return
+    try:
+        user_id = int(args[1])
+        if not 0 < user_id < 2**63:
+            raise ValueError
+    except ValueError:
+        await message.answer(t("admin.invalid_id"))
+        return
+
+    if len(args) == 2:
+        quality = await db.get_user_download_quality(user_id)
+        key = "admin.hd.status"
+    else:
+        profiles = {"off": DEFAULT_QUALITY, "720": "720", "1080": "1080"}
+        quality = profiles.get(args[2].lower())
+        if quality is None:
+            await message.answer(t("admin.hd.usage"))
+            return
+        await db.set_user_download_quality(user_id, quality)
+        logger.info("Admin %s set user %s quality to %s", message.from_user.id, user_id, quality)
+        key = "admin.hd.saved"
+
+    await state.clear()
+    await message.answer(t(key, user_id=user_id, quality=t(f"admin.hd.profile.{quality}")))
 
 
 @router.message(Command("adduser"))

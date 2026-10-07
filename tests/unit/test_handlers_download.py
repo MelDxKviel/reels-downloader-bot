@@ -60,7 +60,7 @@ async def test_handle_url_success_video(tmp_path):
     assert kwargs["chat_id"] == msg.chat.id
     assert (kwargs["width"], kwargs["height"], kwargs["duration"]) == (720, 1280, 10)
     assert kwargs["request_timeout"] == 180
-    mock_set.assert_called_with("https://youtube.com/watch?v=abc", "fileid123")
+    mock_set.assert_called_with("https://youtube.com/watch?v=abc", "fileid123", quality="standard")
     db.record_download.assert_awaited()
 
 

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.config import DATABASE_URL, DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES
+from src.services.download_quality import DEFAULT_QUALITY, validate_quality
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,21 @@ class UserPreference(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     language: Mapped[str] = mapped_column(String(8), default=DEFAULT_LANGUAGE)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class UserDownloadSettings(Base):
+    """Admin-assigned quality, separate from access and language preferences.
+
+    A new table lets create_all upgrade existing installations without ALTERs.
+    Admins and users admitted with the whitelist disabled can also have a profile.
+    """
+
+    __tablename__ = "user_download_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    quality: Mapped[str] = mapped_column(String(16), default=DEFAULT_QUALITY)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
@@ -201,6 +217,33 @@ class DatabaseService:
                 pref.language = language
             await session.commit()
             return True
+
+    async def get_user_download_quality(self, user_id: int) -> str:
+        """Users without an explicit grant use the economical default."""
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(UserDownloadSettings.quality).where(UserDownloadSettings.user_id == user_id)
+            )
+            return validate_quality(result.scalar_one_or_none() or DEFAULT_QUALITY)
+
+    async def set_user_download_quality(self, user_id: int, quality: str) -> None:
+        """Persist a grant/revocation without changing whitelist membership."""
+        validate_quality(quality)
+        async with self.async_session() as session:
+            query = select(UserDownloadSettings).where(UserDownloadSettings.user_id == user_id)
+            row = (await session.execute(query)).scalar_one_or_none()
+            if row is None:
+                session.add(UserDownloadSettings(user_id=user_id, quality=quality))
+                try:
+                    await session.commit()
+                    return
+                except IntegrityError:
+                    await session.rollback()
+                    row = (await session.execute(query)).scalar_one_or_none()
+                    if row is None:
+                        raise
+            row.quality = quality
+            await session.commit()
 
     # === Глобальные настройки / feature flags ===
 

@@ -55,6 +55,7 @@ from src.bot.telegram_retry import (
 )
 from src.config import ADMIN_USERS, VIDEO_STORAGE_CHAT_ID
 from src.services.database import DatabaseService
+from src.services.download_quality import DEFAULT_QUALITY
 from src.services.downloader import downloader
 from src.services.i18n import Translator
 from src.services.media import CarouselSlide
@@ -136,7 +137,8 @@ async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Trans
                 logger.warning("Не удалось получить флаг %s: %s", FEATURE_SHORTS_SEARCH, e)
 
         if shorts_enabled:
-            await _answer_shorts_search(query, text, t)
+            quality = await db.get_user_download_quality(query.from_user.id)
+            await _answer_shorts_search(query, text, t, quality=quality)
             return
 
         await _answer_inline(
@@ -157,21 +159,22 @@ async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Trans
         return
 
     platform = downloader.get_platform_name(url)
+    quality = await db.get_user_download_quality(query.from_user.id)
     result_id = get_url_hash(url)
     results = []
 
     # --- Видео/фото ---
     # Фактический тип медиа берём из cache entry (is_photo), чтобы
     # залежавшийся file_id другого типа не переключал выдачу.
-    cached_carousel_slides = downloader.get_cached_carousel_slides(url)
-    cached_media_type = downloader.get_cached_media_type(url)
+    cached_carousel_slides = downloader.get_cached_carousel_slides(url, quality=quality)
+    cached_media_type = downloader.get_cached_media_type(url, quality=quality)
     cached_photo_id = (
-        downloader.get_telegram_photo_file_id(url)
+        downloader.get_telegram_photo_file_id(url, quality=quality)
         if cached_media_type == "photo" and not cached_carousel_slides
         else None
     )
     cached_video_id = (
-        downloader.get_telegram_file_id(url)
+        downloader.get_telegram_file_id(url, quality=quality)
         if cached_media_type != "photo" and not cached_carousel_slides
         else None
     )
@@ -234,7 +237,9 @@ async def inline_query_handler(query: InlineQuery, db: DatabaseService, t: Trans
     await _answer_inline(query, results=results, cache_time=1, is_personal=True)
 
 
-async def _answer_shorts_search(query: InlineQuery, text: str, t: Translator) -> None:
+async def _answer_shorts_search(
+    query: InlineQuery, text: str, t: Translator, *, quality: str = DEFAULT_QUALITY
+) -> None:
     """Ищет 3 YouTube Shorts по тексту и формирует inline-результаты."""
     try:
         shorts = await search_shorts(text, count=SHORTS_SEARCH_RESULTS, user_id=query.from_user.id)
@@ -269,7 +274,7 @@ async def _answer_shorts_search(query: InlineQuery, text: str, t: Translator) ->
             description_parts.append(_format_duration(item.duration))
         description = " · ".join(description_parts) or t("inline.shorts.default_description")
 
-        cached_file_id = get_cached_video_file_id(item.video_id)
+        cached_file_id = get_cached_video_file_id(item.video_id, quality=quality)
         if cached_file_id:
             results.append(
                 InlineQueryResultCachedVideo(
@@ -382,8 +387,9 @@ async def chosen_inline_handler(
 
     cache_media = operation in {"download", "s"}
     try:
+        quality = await db.get_user_download_quality(user_id) if cache_media else DEFAULT_QUALITY
         result = await downloader.download(
-            url, allow_carousel=cache_media, reserve=cache_media, user_id=user_id
+            url, allow_carousel=cache_media, reserve=cache_media, user_id=user_id, quality=quality
         )
     except Exception as e:
         logger.error("Ошибка скачивания (inline): %s", e, exc_info=True)
@@ -446,6 +452,7 @@ async def chosen_inline_handler(
                     result.file_path,
                     t,
                     cache_file_id=not bool(slides and len(slides) >= 2),
+                    quality=quality,
                 )
             else:
                 await _handle_video(
@@ -463,6 +470,7 @@ async def chosen_inline_handler(
                     thumbnail_path=result.thumbnail_path,
                     cover_path=result.cover_path,
                     cache_file_id=not bool(slides and len(slides) >= 2),
+                    quality=quality,
                 )
 
         elif operation == "mp3":
@@ -500,6 +508,7 @@ async def _handle_video(
     cache_file_id: bool = True,
     thumbnail_path: Optional[str] = None,
     cover_path: Optional[str] = None,
+    quality: str = DEFAULT_QUALITY,
 ) -> None:
     """Загружает видео в storage и подменяет inline-заглушку."""
     # Inline edits cannot attach a local JPEG; upload the cover for a reusable ID.
@@ -518,7 +527,7 @@ async def _handle_video(
         return
 
     if cache_file_id:
-        downloader.set_telegram_file_id(url, file_id)
+        downloader.set_telegram_file_id(url, file_id, quality=quality)
 
     try:
         await retry_transient_telegram(
@@ -556,6 +565,7 @@ async def _handle_photo(
     t: Translator,
     *,
     cache_file_id: bool = True,
+    quality: str = DEFAULT_QUALITY,
 ) -> None:
     """Загружает фото в storage и подменяет inline-заглушку."""
     file_id = await _upload_photo_and_get_file_id(bot, file_path)
@@ -568,7 +578,7 @@ async def _handle_photo(
     # into its first photo on the next inline query.  Per-slide file IDs are not
     # cached yet, so only cache the ID for genuine single-photo results.
     if cache_file_id:
-        downloader.set_telegram_photo_file_id(url, file_id)
+        downloader.set_telegram_photo_file_id(url, file_id, quality=quality)
 
     try:
         await retry_transient_telegram(

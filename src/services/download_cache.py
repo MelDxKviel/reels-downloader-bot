@@ -10,6 +10,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from src.services.download_quality import DEFAULT_QUALITY, validate_quality
 from src.services.media import (
     _MEDIA_CACHE_VERSION,
     CarouselSlide,
@@ -121,8 +122,8 @@ class DownloadCacheMixin:
         return migrated
 
     @cache_locked
-    def _current_media_entry(self, url: str) -> Optional[dict]:
-        url_hash = get_url_hash(url)
+    def _current_media_entry(self, url: str, *, quality: str = DEFAULT_QUALITY) -> Optional[dict]:
+        url_hash = self._get_url_hash(url, quality=quality)
         entry = self.cache.get(url_hash)
         if not entry:
             return None
@@ -173,12 +174,16 @@ class DownloadCacheMixin:
         self._save_cache()
 
     @cache_locked
-    def _get_url_hash(self, url: str) -> str:
-        return get_url_hash(url)
+    def _get_url_hash(self, url: str, *, quality: str = DEFAULT_QUALITY) -> str:
+        validate_quality(quality)
+        key = get_url_hash(url)
+        return key if quality == DEFAULT_QUALITY else f"{key}:{quality}"
 
     @cache_locked
-    def get_from_cache(self, url: str, *, reserve: bool = False) -> Optional[DownloadResult]:
-        result = self._get_from_cache(url)
+    def get_from_cache(
+        self, url: str, *, reserve: bool = False, quality: str = DEFAULT_QUALITY
+    ) -> Optional[DownloadResult]:
+        result = self._get_from_cache(url, quality=quality)
         if result is not None and reserve:
             self.reserve_result(result)
         return result
@@ -219,9 +224,11 @@ class DownloadCacheMixin:
                     self._delete_entry_files({"file_path": path})
 
     @cache_locked
-    def _get_from_cache(self, url: str) -> Optional[DownloadResult]:
+    def _get_from_cache(
+        self, url: str, *, quality: str = DEFAULT_QUALITY
+    ) -> Optional[DownloadResult]:
         """Проверяет наличие видео/фото в кэше."""
-        url_hash = get_url_hash(url)
+        url_hash = self._get_url_hash(url, quality=quality)
         if url_hash in self.cache:
             cached = self._invalidate_legacy_media(url_hash, self.cache[url_hash])
             if not self._has_cached_media(cached):
@@ -306,10 +313,12 @@ class DownloadCacheMixin:
         return slides if len(slides) >= 2 else None
 
     @cache_locked
-    def add_to_cache(self, url: str, result: DownloadResult) -> None:
+    def add_to_cache(
+        self, url: str, result: DownloadResult, *, quality: str = DEFAULT_QUALITY
+    ) -> None:
         """Добавляет результат в кэш."""
         if result.success and result.file_path:
-            url_hash = get_url_hash(url)
+            url_hash = self._get_url_hash(url, quality=quality)
             entry = self.cache.get(url_hash, {})
             if entry:
                 entry = self._invalidate_legacy_media(url_hash, entry)
@@ -365,20 +374,22 @@ class DownloadCacheMixin:
         return entry
 
     @cache_locked
-    def get_telegram_file_id(self, url: str) -> Optional[str]:
+    def get_telegram_file_id(self, url: str, *, quality: str = DEFAULT_QUALITY) -> Optional[str]:
         """Возвращает сохранённый Telegram file_id для URL, если есть."""
-        entry = self._current_media_entry(url)
+        entry = self._current_media_entry(url, quality=quality)
         if not entry:
             return None
         file_id = entry.get("telegram_file_id")
         return file_id if isinstance(file_id, str) and file_id else None
 
     @cache_locked
-    def set_telegram_file_id(self, url: str, file_id: str) -> None:
+    def set_telegram_file_id(
+        self, url: str, file_id: str, *, quality: str = DEFAULT_QUALITY
+    ) -> None:
         """Сохраняет Telegram file_id для URL (используется для inline-mode)."""
         if not file_id:
             return
-        url_hash = get_url_hash(url)
+        url_hash = self._get_url_hash(url, quality=quality)
         entry = self._invalidate_legacy_media(url_hash, self._get_or_create_entry(url_hash))
         if (
             entry.get("telegram_file_id") == file_id
@@ -395,14 +406,14 @@ class DownloadCacheMixin:
         self._save_cache()
 
     @cache_locked
-    def get_cached_media_type(self, url: str) -> Optional[str]:
+    def get_cached_media_type(self, url: str, *, quality: str = DEFAULT_QUALITY) -> Optional[str]:
         """
         Возвращает фактический тип медиа для URL, как он сохранён в кэше:
         "photo" или "video". None — если запись отсутствует или тип не
         определён. Используется inline-хендлером, чтобы не спутать свежие
         file_id с залежавшимися от предыдущего скачивания другого типа.
         """
-        entry = self._current_media_entry(url)
+        entry = self._current_media_entry(url, quality=quality)
         if not entry:
             return None
         if entry.get("is_photo"):
@@ -415,29 +426,35 @@ class DownloadCacheMixin:
         return None
 
     @cache_locked
-    def get_cached_carousel_slides(self, url: str) -> Optional[list]:
+    def get_cached_carousel_slides(
+        self, url: str, *, quality: str = DEFAULT_QUALITY
+    ) -> Optional[list]:
         """Return ordered cached rich-carousel slides, if the URL is a carousel."""
 
-        entry = self._current_media_entry(url)
+        entry = self._current_media_entry(url, quality=quality)
         if not entry:
             return None
         return self._deserialize_carousel_slides(entry.get("carousel_slides"))
 
     @cache_locked
-    def get_telegram_photo_file_id(self, url: str) -> Optional[str]:
+    def get_telegram_photo_file_id(
+        self, url: str, *, quality: str = DEFAULT_QUALITY
+    ) -> Optional[str]:
         """Возвращает сохранённый Telegram photo file_id для URL, если есть."""
-        entry = self._current_media_entry(url)
+        entry = self._current_media_entry(url, quality=quality)
         if not entry:
             return None
         file_id = entry.get("telegram_photo_file_id")
         return file_id if isinstance(file_id, str) and file_id else None
 
     @cache_locked
-    def set_telegram_photo_file_id(self, url: str, file_id: str) -> None:
+    def set_telegram_photo_file_id(
+        self, url: str, file_id: str, *, quality: str = DEFAULT_QUALITY
+    ) -> None:
         """Сохраняет Telegram photo file_id для URL (используется для inline-mode)."""
         if not file_id:
             return
-        url_hash = get_url_hash(url)
+        url_hash = self._get_url_hash(url, quality=quality)
         entry = self._invalidate_legacy_media(url_hash, self._get_or_create_entry(url_hash))
         if (
             entry.get("telegram_photo_file_id") == file_id

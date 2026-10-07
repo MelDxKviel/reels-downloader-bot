@@ -14,10 +14,10 @@ from src.services.downloader import DownloadResult, VideoDownloader, _is_instagr
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
-async def _in_process_worker(service, url, allow_carousel):
+async def _in_process_worker(service, url, allow_carousel, *, quality="standard"):
     # Source orchestration unit tests replace external backends in this process.
     # Separate worker integration tests exercise production process isolation.
-    return await service._download_source(url, allow_carousel)
+    return await service._download_source(url, allow_carousel, quality=quality)
 
 
 def make_downloader(tmp_path: Path) -> VideoDownloader:
@@ -338,7 +338,8 @@ def test_get_ydl_opts_format_without_ffmpeg(tmp_path):
     d = make_downloader(tmp_path)
     d.has_ffmpeg = False
     opts = d._get_ydl_opts("out.%(ext)s", "https://youtube.com/watch?v=abc")
-    assert "best[ext=mp4]/best" in opts["format"]
+    assert "best[ext=mp4]" in opts["format"]
+    assert opts["format_sort"][0] == "res:480"
     assert "merge_output_format" not in opts
 
 
@@ -856,7 +857,7 @@ async def test_download_retries_without_cookies_on_invalid_cookiefile(tmp_path):
         # Inject a cookiefile so the retry branch is reachable.
         original_get_ydl_opts = d._get_ydl_opts
 
-        def patched_get_ydl_opts(output_path, u):
+        def patched_get_ydl_opts(output_path, u, *, quality="standard"):
             opts = original_get_ydl_opts(output_path, u)
             opts["cookiefile"] = "/fake/cookies.txt"
             return opts

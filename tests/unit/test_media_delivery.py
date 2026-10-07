@@ -64,4 +64,6 @@ async def test_media_lease_survives_clear_during_upload_and_is_released(
         await module.handle_url(message, make_db(), Translator("en"))
     assert not service._leases
     assert not path.exists()
-    service.download.assert_awaited_once_with(url, user_id=message.from_user.id, reserve=True)
+    service.download.assert_awaited_once_with(
+        url, user_id=message.from_user.id, reserve=True, quality="standard"
+    )
