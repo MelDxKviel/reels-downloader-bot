@@ -29,6 +29,7 @@ from src.services.media import (
 from src.services.url_utils import (
     build_kkinstagram_url,
     is_instagram_photo_candidate_url,
+    is_instagram_post_url,
     is_instagram_url,
     is_kkinstagram_url,
 )
@@ -200,23 +201,29 @@ class InstagramMixin:
                 image_versions.get("candidates") if isinstance(image_versions, dict) else None
             )
             ranked_images: list[tuple[int, str]] = []
+            fallback_images: list[tuple[int, str]] = []
             for candidate in candidates if isinstance(candidates, list) else []:
                 if not isinstance(candidate, dict):
                     continue
                 image_url = candidate.get("url")
                 if not isinstance(image_url, str):
                     continue
-                if os.path.splitext(urlparse(image_url).path)[1].lower() not in _IMAGE_EXTENSIONS:
-                    continue
                 try:
                     area = int(candidate.get("width") or 0) * int(candidate.get("height") or 0)
                 except TypeError, ValueError:
                     area = 0
-                ranked_images.append((area, image_url))
-            if ranked_images:
+                fallback_images.append((area, image_url))
+                if os.path.splitext(urlparse(image_url).path)[1].lower() in _IMAGE_EXTENSIONS:
+                    ranked_images.append((area, image_url))
+            # ``image_versions2`` entries are stills by definition, so if none of
+            # them carries an extension Telegram understands, keep the largest
+            # anyway. Dropping the child would break the slide-count check below
+            # and disable the whole recovery for an otherwise valid photo post.
+            chosen_images = ranked_images or fallback_images
+            if chosen_images:
                 # Exactly one selected image per product child. Do not dedupe:
                 # repeated carousel slides are still distinct ordered items.
-                image_urls.append(max(ranked_images, key=lambda item: item[0])[1])
+                image_urls.append(max(chosen_images, key=lambda item: item[0])[1])
 
             if video_url is None:
                 versions = node.get("video_versions")
@@ -394,6 +401,34 @@ class InstagramMixin:
         best = max(target_nodes, key=completeness)
         return json.dumps(best, ensure_ascii=False)
 
+    @classmethod
+    def _instagram_target_product_media(cls, target_payload: Optional[str]) -> Optional[dict]:
+        """Classify a target-scoped Polaris product payload into media info.
+
+        Current Instagram post pages embed the requested post's product JSON.
+        A single item is wrapped in ``if_not_gated_logged_out`` while a carousel
+        exposes its fields (``media_type``, ``carousel_media``) at the top level,
+        so unwrap before classifying. Using this structured payload keeps the
+        media kind and the ordered slides authoritative to the requested post,
+        instead of scanning unrelated page JSON (which can contain a stray
+        ``media_type: 2`` and misreport a photo as a video).
+        """
+
+        if not target_payload:
+            return None
+        try:
+            node = json.loads(target_payload)
+        except (ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(node, dict):
+            return None
+        for key in ("if_not_gated_logged_out", "if_gated_logged_out"):
+            nested = node.get(key)
+            if isinstance(nested, dict):
+                node = nested
+                break
+        return cls._instagram_product_to_media_info(node)
+
     def _fetch_instagram_media_info(self, url: str) -> Optional[dict]:
         """
         Запрашивает Instagram-пост и собирает список изображений (для поддержки
@@ -418,17 +453,23 @@ class InstagramMixin:
                 if product_media is not None:
                     return product_media
 
-        # /reel/, /reels/ and /tv/ remain video by default. Only authoritative
-        # product metadata above may prove that such a share URL is photographic;
-        # unscoped HTML/og:image must never turn a failed video into its cover.
-        if not is_instagram_photo_candidate_url(url):
+        # Only single-post URLs can be probed for photos. The shortcode-scoped
+        # /embed/ page is safe for every post type, including /reel/, /reels/ and
+        # /tv/ share links, because it is resolved from the target code itself.
+        # Those share links otherwise stay video by default, so for them we never
+        # consult the main page (its JSON can carry recommendation thumbnails).
+        # A genuine video reel still exposes media_type=2/video_versions markers,
+        # and the caller rejects any result whose ``has_video`` marker is set.
+        if not is_instagram_post_url(url):
             return None
 
         candidates: list[str] = []
         if shortcode:
             candidates.append(f"https://www.instagram.com/p/{shortcode}/embed/captioned")
             candidates.append(f"https://www.instagram.com/p/{shortcode}/embed/")
-        candidates.append(url)
+        if is_instagram_photo_candidate_url(url):
+            # Only /p/<code> may fall back to the main page / raw URL scrape.
+            candidates.append(url)
         kk = build_kkinstagram_url(url)
         if kk and kk not in candidates:
             candidates.append(kk)
@@ -457,7 +498,23 @@ class InstagramMixin:
             )
             is_target_main = target_payload is not None
             is_trusted_target = is_target_embed or is_target_main or is_target_mirror
-            parsed = self._parse_instagram_html(target_payload or html)
+            # The requested post's own product JSON is authoritative: derive the
+            # media kind, slide order and video flag from it directly. Only fall
+            # back to the regex scan when the payload is absent or unclassifiable,
+            # since the full page JSON also carries unrelated recommendations.
+            parsed = None
+            if is_target_main:
+                structured = self._instagram_target_product_media(target_payload)
+                if structured is not None:
+                    parsed = {
+                        "image_urls": structured["image_urls"],
+                        "video_url": structured["video_url"],
+                        "has_video_marker": structured["has_video"],
+                        "media_kind": structured["media_kind"],
+                        "title": structured["title"],
+                    }
+            if parsed is None:
+                parsed = self._parse_instagram_html(target_payload or html)
             if is_target_embed:
                 image_urls = trusted_image_urls
             elif is_target_main:
@@ -535,6 +592,13 @@ class InstagramMixin:
                             "image/webp,*/*;q=0.8"
                         ),
                         "Accept-Language": "en-US,en;q=0.9",
+                        # Instagram serves the full document (with the embedded
+                        # Polaris product JSON) only for requests that look like a
+                        # top-level browser navigation. Without this header the
+                        # same URL returns a stripped SPA shell with no media
+                        # JSON, which is what silently broke photo/carousel
+                        # recovery. yt-dlp sends the equivalent header.
+                        "Sec-Fetch-Mode": "navigate",
                     },
                 )
                 if cookie_jar is not None:
