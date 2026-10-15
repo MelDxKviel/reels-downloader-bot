@@ -22,7 +22,7 @@ async def cmd_start(message: Message, t: Translator) -> None:
 @router.message(Command("help"))
 async def cmd_help(message: Message, t: Translator) -> None:
     """Обработчик команды /help."""
-    text = t("help.text")
+    text = t("help.text") + "\n\n" + t("help.reply_conversion")
     if is_admin(message.from_user.id):
         text += t("help.admin_suffix")
     await message.answer(text, link_preview_options=LinkPreviewOptions(is_disabled=True))

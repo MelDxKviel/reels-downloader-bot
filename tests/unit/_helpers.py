@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 def make_message(text: str = "", user_id: int = 100, chat_id: int = 100):
     msg = MagicMock()
     msg.text = text
+    msg.caption = None
+    msg.reply_to_message = None
     msg.from_user = MagicMock()
     msg.from_user.id = user_id
     msg.from_user.full_name = "Test User"

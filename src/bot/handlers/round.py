@@ -206,6 +206,13 @@ async def cmd_round(
 
     url = extract_url(rest) if rest else None
 
+    source = message.reply_to_message if not rest else None
+    if source is not None:
+        if source.video or source.document:
+            await round_got_video(message, state, db, t, source_message=source)
+            return
+        url = extract_url(source.text or source.caption)
+
     if url:
         await state.clear()
         status_msg = await message.answer(t("common.processing"))
@@ -213,7 +220,7 @@ async def cmd_round(
         return
 
     prompt = await message.answer(
-        t("round.prompt"),
+        t("round.prompt") + "\n\n" + t("conversion.reply_hint", command="round"),
         reply_markup=_cancel_keyboard(message.from_user.id, t),
     )
     await state.set_state(RoundStates.waiting_for_input)
@@ -267,17 +274,23 @@ async def round_got_url(
 
 @router.message(RoundStates.waiting_for_input, F.video | F.document)
 async def round_got_video(
-    message: Message, state: FSMContext, db: DatabaseService, t: Translator
+    message: Message,
+    state: FSMContext,
+    db: DatabaseService,
+    t: Translator,
+    *,
+    source_message: Message | None = None,
 ) -> None:
-    """Получен видеофайл в режиме ожидания."""
-    if message.video:
-        file_id = message.video.file_id
-    elif message.document:
-        mime = message.document.mime_type or ""
+    """Convert an upload or reply; the command message owns delivery and statistics."""
+    source = source_message if source_message is not None else message
+    if source.video:
+        file_id = source.video.file_id
+    elif source.document:
+        mime = source.document.mime_type or ""
         if not mime.startswith("video/"):
             await message.answer(t("round.not_video"))
             return
-        file_id = message.document.file_id
+        file_id = source.document.file_id
     else:
         return
 
@@ -301,6 +314,12 @@ async def round_got_video(
         except Exception as e:
             logger.error("Ошибка загрузки файла из Telegram: %s", e, exc_info=True)
             await status_msg.edit_text(t("round.upload_failed"))
+            await db.record_download(
+                user_id=message.from_user.id,
+                platform="Upload",
+                url=f"upload:{message.from_user.id}",
+                success=False,
+            )
             return
         await _send_round(
             message,

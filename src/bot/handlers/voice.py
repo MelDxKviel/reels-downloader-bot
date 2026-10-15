@@ -197,6 +197,13 @@ async def cmd_voice(
 
     url = extract_url(rest) if rest else None
 
+    source = message.reply_to_message if not rest else None
+    if source is not None:
+        if source.video or source.audio or source.document:
+            await voice_got_file(message, state, db, t, source_message=source)
+            return
+        url = extract_url(source.text or source.caption)
+
     if url:
         await state.clear()
         status_msg = await message.answer(t("common.processing"))
@@ -204,7 +211,7 @@ async def cmd_voice(
         return
 
     prompt = await message.answer(
-        t("voice.prompt"),
+        t("voice.prompt") + "\n\n" + t("conversion.reply_hint", command="voice"),
         reply_markup=_cancel_keyboard(message.from_user.id, t),
     )
     await state.set_state(VoiceStates.waiting_for_input)
@@ -258,23 +265,29 @@ async def voice_got_url(
 
 @router.message(VoiceStates.waiting_for_input, F.video | F.audio | F.document)
 async def voice_got_file(
-    message: Message, state: FSMContext, db: DatabaseService, t: Translator
+    message: Message,
+    state: FSMContext,
+    db: DatabaseService,
+    t: Translator,
+    *,
+    source_message: Message | None = None,
 ) -> None:
-    """Получен видео- или аудиофайл в режиме ожидания."""
-    if message.video:
-        file_id = message.video.file_id
+    """Convert an upload or reply; the command message owns delivery and statistics."""
+    source = source_message if source_message is not None else message
+    if source.video:
+        file_id = source.video.file_id
         ext = ".mp4"
         status_text = t("voice.upload_video_status")
-    elif message.audio:
-        file_id = message.audio.file_id
+    elif source.audio:
+        file_id = source.audio.file_id
         ext = ".mp3"
         status_text = t("voice.upload_audio_status")
-    elif message.document:
-        mime = message.document.mime_type or ""
+    elif source.document:
+        mime = source.document.mime_type or ""
         if not (mime.startswith("video/") or mime.startswith("audio/")):
             await message.answer(t("voice.unsupported_format"))
             return
-        file_id = message.document.file_id
+        file_id = source.document.file_id
         ext = ".mp4" if mime.startswith("video/") else ".mp3"
         status_text = t("voice.upload_file_status")
     else:
@@ -300,6 +313,12 @@ async def voice_got_file(
         except Exception as e:
             logger.error("Ошибка загрузки файла из Telegram: %s", e, exc_info=True)
             await status_msg.edit_text(t("voice.upload_failed"))
+            await db.record_download(
+                user_id=message.from_user.id,
+                platform="Upload",
+                url=f"upload:{message.from_user.id}",
+                success=False,
+            )
             return
         await _send_voice(
             message,

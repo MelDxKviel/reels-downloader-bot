@@ -36,6 +36,7 @@
 | 🔐 **Access control** | Whitelist system: only added users can use the bot |
 | 🪄 **Inline mode** | Send videos from any chat: `@bot_name <url>` |
 | 🎥 **Video notes** | `/round` command — converts video to Telegram video note format |
+| ↩️ **Convert by replying** | Reply to an existing video, file or link with `/mp3`, `/voice`, `/gif` or `/round` |
 | 📊 **Statistics** | Per-platform and per-user download stats stored in PostgreSQL |
 | 🌐 **Localization** | Interface in Russian and English; each user picks their language via `/language` |
 | 🐳 **Docker Compose** | Bot + PostgreSQL launched with a single command |
@@ -194,6 +195,21 @@ cleanup defaults.
 | `/clearcache` | Clear the local cache |
 
 > 💡 You can also just send a URL in the chat — the bot will download it automatically.
+
+To convert something already in the chat, **reply to that message** with `/mp3`,
+`/voice`, `/gif` or `/round`, without arguments. This works with videos, documents
+whose MIME type is `video/*`, and visible links in message text or captions.
+`/voice` also accepts audio messages sent as music/files (`audio/*` documents).
+For example, reply `/mp3` to a video the bot just sent to extract its audio.
+
+An explicit URL after the command takes priority over the replied message. When
+replying to a video with a link in its caption, the attached video is converted.
+Unsupported replies show the usual input prompt; documents of an unsupported
+type show a format error. The result is sent to the chat where the command was
+called, and statistics/queue limits belong to the caller. Existing access rules,
+conversion limits and Telegram file-download restrictions still apply. No new
+configuration is needed; without a usable reply you can still send a source
+after the command and cancel via its button.
 
 ### Inline Mode
 

@@ -44,13 +44,14 @@ async def test_main_router_routes_new_commands_outside_active_fsm():
         ),
     }
 
-    async def send(text):
+    async def send(text, *, reply_to_message=None):
         message = Message(
             message_id=1,
             date=datetime.now(timezone.utc),
             chat=Chat(id=100, type="private"),
             from_user=User(id=100, is_bot=False, first_name="Test"),
             text=text,
+            reply_to_message=reply_to_message,
         )
         await dispatcher.feed_update(bot, Update(update_id=1, message=message), db=db, t=t)
 
@@ -82,6 +83,27 @@ async def test_main_router_routes_new_commands_outside_active_fsm():
                         for command, call in calls.items():
                             if command != destination or not with_url:
                                 assert call.await_count == 0, scenario
+
+            # Replies must select the new command even while another command waits.
+            source = Message(
+                message_id=7,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=100, type="private"),
+                from_user=User(id=999, is_bot=False, first_name="Original author"),
+                text="https://youtube.com/watch?v=replied",
+            )
+            for previous in (*commands, "adduser"):
+                for destination in ("mp3", "voice", "gif", "round"):
+                    await state.clear()
+                    await send(f"/{previous}")
+                    for call in calls.values():
+                        call.reset_mock()
+                    await send(f"/{destination}", reply_to_message=source)
+                    assert await state.get_state() is None, (previous, destination)
+                    call = calls[destination]
+                    call.assert_awaited_once()
+                    assert call.await_args.args[0].from_user.id == 100
+                    assert call.await_args.args[3] == "https://youtube.com/watch?v=replied"
     finally:
         await dispatcher.storage.close()
         await bot.session.close()
