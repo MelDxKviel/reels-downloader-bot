@@ -32,6 +32,7 @@
 | Feature | Description |
 |---|---|
 | 📥 **Multi-platform** | YouTube, Instagram Reels, TikTok, X (Twitter) |
+| 📎 **Batch downloads** | `/batch` downloads up to five links in order, with a completion summary |
 | ⚡ **Download cache** | Repeated links are served instantly from local cache |
 | 🔐 **Access control** | Whitelist system: only added users can use the bot |
 | 🪄 **Inline mode** | Send videos from any chat: `@bot_name <url>` |
@@ -186,6 +187,7 @@ cleanup defaults.
 | `/help` | Command reference |
 | `/id` | Show your Telegram user ID |
 | `/download [url]` | Download video by URL (immediate or FSM waiting state) |
+| `/batch [urls]` | Download up to five different links in one message |
 | `/mp3 [url]` | Download audio and send as an MP3 file |
 | `/voice [url]` | Download audio and send as a Telegram voice message |
 | `/gif [url]` | Download video and convert to a GIF |
@@ -210,6 +212,32 @@ called, and statistics/queue limits belong to the caller. Existing access rules,
 conversion limits and Telegram file-download restrictions still apply. No new
 configuration is needed; without a usable reply you can still send a source
 after the command and cancel via its button.
+
+### Batch Downloads
+
+Send a list after `/batch`, separated by spaces or new lines:
+
+```text
+/batch https://youtu.be/VIDEO_ID
+https://www.instagram.com/p/POST_ID/
+https://x.com/user/status/POST_ID
+```
+
+You can also send `/batch` first, then the links in a single message. The cancel
+button dismisses the input prompt; it does not interrupt downloads already running.
+The bot accepts up to **five different supported links**, skips unsupported sites
+and repeated URLs (including variants differing only in tracking parameters), and
+preserves the first occurrence of each link. If the list exceeds the limit,
+**nothing is downloaded**: shorten the list and send it again.
+
+Each post is delivered in order as its usual video, photo or complete carousel.
+An individual download or upload failure does not stop the remaining links. The
+summary shows how many posts were sent and the positions of failed links in the
+list after duplicates and unsupported sites have been removed, so you can retry
+those links. Positions count posts, including whole carousels, rather than files.
+Your quality profile, cache, per-user queue limits and the 50 MB file limit apply
+to each link; statistics record each attempted post separately. No new settings
+are needed. `/batch` works in bot chats; inline mode continues to accept one link.
 
 ### Inline Mode
 

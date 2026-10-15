@@ -12,6 +12,7 @@ def user_commands(t: Translator) -> List[BotCommand]:
         BotCommand(command="start", description=t("menu.start")),
         BotCommand(command="help", description=t("menu.help")),
         BotCommand(command="download", description=t("menu.download")),
+        BotCommand(command="batch", description=t("menu.batch")),
         BotCommand(command="mp3", description=t("menu.mp3")),
         BotCommand(command="voice", description=t("menu.voice")),
         BotCommand(command="round", description=t("menu.round")),

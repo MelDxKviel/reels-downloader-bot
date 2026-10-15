@@ -3,6 +3,7 @@
 from aiogram import Router
 
 from .admin import router as admin_router
+from .batch import router as batch_router
 from .common import router as common_router
 from .download import router as download_router
 from .download_cmd import router as download_cmd_router
@@ -22,6 +23,7 @@ def get_main_router() -> Router:
     main_router.include_router(admin_router)  # Админ-команды первые
     main_router.include_router(language_router)  # /language и его callback
     main_router.include_router(common_router)  # Общие команды
+    main_router.include_router(batch_router)  # /batch — до обработчиков ожидания ввода
     main_router.include_router(download_cmd_router)  # /download — до FSM-обработчиков gif/round/mp3
     main_router.include_router(mp3_router)  # /mp3 — до FSM-обработчиков gif/round/voice
     main_router.include_router(voice_router)  # /voice — до FSM-обработчиков gif/round

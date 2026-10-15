@@ -58,7 +58,8 @@ async def _download_and_send(
     status_msg: Message,
     url: str,
     t: Translator,
-) -> None:
+) -> bool:
+    """Deliver one URL and report success to callers such as /batch."""
     platform = downloader.get_platform_name(url)
     await status_msg.edit_text(t("download.start_status", platform=platform))
 
@@ -73,7 +74,7 @@ async def _download_and_send(
         await db.record_download(
             user_id=message.from_user.id, platform=platform, url=url, success=False
         )
-        return
+        return False
 
     try:
         if not result.success:
@@ -82,7 +83,7 @@ async def _download_and_send(
             await db.record_download(
                 user_id=message.from_user.id, platform=platform, url=url, success=False
             )
-            return
+            return False
 
         slides = result.carousel_slides if isinstance(result.carousel_slides, list) else None
         if slides and len(slides) >= 2:
@@ -138,12 +139,14 @@ async def _download_and_send(
                 message.from_user.id,
                 result.from_cache,
             )
+            return True
         except Exception as e:
             logger.error("Ошибка при отправке: %s", e, exc_info=True)
             await status_msg.edit_text(t("download.send_error"))
             await db.record_download(
                 user_id=message.from_user.id, platform=platform, url=url, success=False
             )
+            return False
 
     finally:
         downloader.release_result(result)

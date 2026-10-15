@@ -106,6 +106,22 @@ def extract_url(text: Optional[str]) -> Optional[str]:
     return url or None
 
 
+def extract_urls(text: str | None) -> list[str]:
+    """Return distinct supported URLs in order, keeping the first original spelling.
+
+    Tracking-only variants share the same identity as the download cache.
+    """
+    urls = []
+    seen = set()
+    for match in URL_PATTERN.finditer(text or ""):
+        url = match.group(0).rstrip(_TRAILING_URL_PUNCT)
+        normalized = normalize_url(url)
+        if normalized not in seen:
+            seen.add(normalized)
+            urls.append(url)
+    return urls
+
+
 def get_url_hash(url: str) -> str:
     """Return a 16-char MD5 hex digest of the normalized URL."""
     return hashlib.md5(normalize_url(url).encode()).hexdigest()[:16]

@@ -8,7 +8,7 @@ import pytest
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Chat, Message, Update, User
 
-from src.bot.handlers import admin, download_cmd, get_main_router, gif, mp3, voice
+from src.bot.handlers import admin, batch, download_cmd, get_main_router, gif, mp3, voice
 from src.bot.handlers import round as round_handler
 from src.services.i18n import Translator
 
@@ -29,6 +29,7 @@ async def test_main_router_routes_new_commands_outside_active_fsm():
     db = make_db()
     t = Translator("en")
     commands = {
+        "batch": (batch, "_download_batch", batch.BatchStates.waiting_for_urls),
         "download": (
             download_cmd,
             "_download_and_send",
