@@ -1,5 +1,6 @@
 """Tests for bot/commands.py command list builders."""
 
+import pytest
 from aiogram.types import BotCommand
 
 from src.bot.commands import admin_commands, user_commands
@@ -36,3 +37,11 @@ def test_user_commands_translated_descriptions():
     en = user_commands(Translator("en"))
     ru = user_commands(Translator("ru"))
     assert [c.description for c in en] != [c.description for c in ru]
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_batch_command_is_available_in_localized_user_and_admin_menus(lang):
+    for commands in (user_commands, admin_commands):
+        batch = [command for command in commands(Translator(lang)) if command.command == "batch"]
+        assert len(batch) == 1
+        assert "5" in batch[0].description

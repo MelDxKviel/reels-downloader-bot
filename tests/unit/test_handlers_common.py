@@ -56,3 +56,13 @@ async def test_cmd_id_without_username():
     await common_h.cmd_id(msg, Translator("en"))
     text = msg.answer.await_args.args[0]
     assert "100" in text
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+async def test_help_explains_batch_download_and_limit(lang):
+    msg = make_message("/help", user_id=999)
+    with patch("src.bot.handlers.common.is_admin", return_value=False):
+        await common_h.cmd_help(msg, Translator(lang))
+    text = msg.answer.await_args.args[0]
+    assert "/batch" in text
+    assert "5" in text.split("/batch", 1)[1].split("\n", 1)[0]
