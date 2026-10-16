@@ -128,18 +128,10 @@ async def _download_and_send(
                     "sendVideo(user)",
                 )
                 if sent.video and sent.video.file_id:
-                    downloader.set_telegram_file_id(url, sent.video.file_id, quality=quality)
-            await status_msg.delete()
-            await db.record_download(
-                user_id=message.from_user.id, platform=platform, url=url, success=True
-            )
-            logger.info(
-                "✅ %s отправлено (пользователь: %s, из кэша: %s)",
-                media_label.capitalize(),
-                message.from_user.id,
-                result.from_cache,
-            )
-            return True
+                    try:
+                        downloader.set_telegram_file_id(url, sent.video.file_id, quality=quality)
+                    except Exception:
+                        logger.warning("Could not cache delivered video file ID", exc_info=True)
         except Exception as e:
             logger.error("Ошибка при отправке: %s", e, exc_info=True)
             await status_msg.edit_text(t("download.send_error"))
@@ -147,6 +139,26 @@ async def _download_and_send(
                 user_id=message.from_user.id, platform=platform, url=url, success=False
             )
             return False
+
+        # Delivery has succeeded. Bookkeeping must not report it as a failed upload
+        # or encourage the user to retry media they already received.
+        try:
+            await status_msg.delete()
+        except Exception:
+            logger.warning("Could not remove delivered item's status", exc_info=True)
+        try:
+            await db.record_download(
+                user_id=message.from_user.id, platform=platform, url=url, success=True
+            )
+        except Exception:
+            logger.warning("Could not record successful delivery", exc_info=True)
+        logger.info(
+            "✅ %s отправлено (пользователь: %s, из кэша: %s)",
+            media_label.capitalize(),
+            message.from_user.id,
+            result.from_cache,
+        )
+        return True
 
     finally:
         downloader.release_result(result)

@@ -47,24 +47,40 @@ async def _download_batch(
     failed_positions = []
     for position, url in enumerate(urls, start=1):
         if position > 1:
-            await retry_transient_telegram(
-                lambda: summary.edit_text(t("batch.progress", current=position, total=total)),
-                "editMessageText(batch progress)",
+            try:
+                await retry_transient_telegram(
+                    lambda: summary.edit_text(t("batch.progress", current=position, total=total)),
+                    "editMessageText(batch progress)",
+                )
+            except Exception:
+                logger.warning(
+                    "Could not update batch progress at item %s", position, exc_info=True
+                )
+        try:
+            status = await retry_transient_telegram(
+                lambda: message.answer(t("common.processing")), "sendMessage(batch item)"
             )
-        status = await retry_transient_telegram(
-            lambda: message.answer(t("common.processing")), "sendMessage(batch item)"
-        )
-        # Await delivery and release of its cache lease before admitting the next link.
-        if not await _download_and_send(message, db, status, url, t):
+            # Await delivery and release of its cache lease before admitting the next link.
+            successful = await _download_and_send(message, db, status, url, t)
+        except Exception:
+            # Status updates and statistics can fail outside the delivery helper's guards.
+            # Catch ordinary failures only: cancellation must still stop the whole batch.
+            logger.exception("Batch item %s failed", position)
+            successful = False
+        if not successful:
             failed_positions.append(str(position))
 
     failed = len(failed_positions)
     text = t("batch.complete", total=total, successful=total - failed, failed=failed)
     if failed_positions:
         text += "\n" + t("batch.failed_positions", positions=", ".join(failed_positions))
-    await retry_transient_telegram(
-        lambda: summary.edit_text(text), "editMessageText(batch complete)"
-    )
+    try:
+        await retry_transient_telegram(
+            lambda: summary.edit_text(text), "editMessageText(batch complete)"
+        )
+    except Exception:
+        logger.warning("Could not edit batch summary; sending a new message", exc_info=True)
+        await retry_transient_telegram(lambda: message.answer(text), "sendMessage(batch complete)")
 
 
 @router.message(Command("batch"))

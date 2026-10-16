@@ -362,3 +362,162 @@ async def test_cached_batch_delivers_real_media_previews_and_reusable_inline_vid
     cached = query.answer.await_args.kwargs["results"][0]
     assert cached.video_file_id == "batch-real-video-id"
     assert query.answer.await_args.kwargs["is_personal"] is True
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+@pytest.mark.parametrize(
+    "failure",
+    ["status_creation", "start_status", "send_status", "error_status", "failure_statistics"],
+)
+async def test_batch_isolates_item_status_and_statistics_errors(
+    tmp_path, monkeypatch, lang, failure
+):
+    service = VideoDownloader(str(tmp_path), worker_runner=AsyncMock())
+    for index, url in enumerate(URLS):
+        path = tmp_path / f"{index}.mp4"
+        path.write_bytes(b"cached")
+        service.add_to_cache(url, DownloadResult(success=True, file_path=str(path)))
+    monkeypatch.setattr(download_cmd, "downloader", service)
+    message = make_message("/batch " + " ".join(URLS))
+    summary = make_status_message()
+    statuses = [make_status_message() for _ in URLS]
+    error = RuntimeError("private technical detail")
+    message.answer.side_effect = [
+        summary,
+        statuses[0],
+        error if failure == "status_creation" else statuses[1],
+        statuses[2],
+    ]
+    if failure == "start_status":
+        statuses[1].edit_text.side_effect = error
+    elif failure == "send_status":
+        statuses[1].edit_text.side_effect = [None, error]
+    elif failure == "error_status":
+        message.bot.send_video.side_effect = [MagicMock(video=None), error, MagicMock(video=None)]
+        statuses[1].edit_text.side_effect = [None, None, error]
+    db = make_db()
+    if failure == "failure_statistics":
+        message.bot.send_video.side_effect = [MagicMock(video=None), error, MagicMock(video=None)]
+
+        async def record(**kwargs):
+            if kwargs["url"] == URLS[1]:
+                raise error
+
+        db.record_download.side_effect = record
+
+    await batch.cmd_batch(message, make_state(), db, Translator(lang))
+
+    final = summary.edit_text.await_args.args[0]
+    assert Translator(lang)("batch.complete", total=3, successful=2, failed=1) in final
+    assert Translator(lang)("batch.failed_positions", positions="2") in final
+    assert "private" not in final
+    assert Path(message.bot.send_video.await_args.kwargs["video"].path).stem == "2"
+    assert not service._leases
+    assert db.record_download.await_args.kwargs["url"] == URLS[2]
+
+
+async def test_batch_progress_failure_does_not_skip_item_and_summary_falls_back(monkeypatch):
+    message = make_message("/batch " + " ".join(URLS))
+    summary = make_status_message()
+    summary.edit_text.side_effect = RuntimeError("summary was deleted")
+    message.answer.side_effect = [summary, *[make_status_message() for _ in URLS], None]
+    deliver = AsyncMock(return_value=True)
+    monkeypatch.setattr(batch, "_download_and_send", deliver)
+
+    await batch.cmd_batch(message, make_state(), make_db(), Translator("en"))
+
+    assert [call.args[3] for call in deliver.await_args_list] == URLS
+    message.answer.assert_awaited_with(
+        Translator("en")("batch.complete", total=3, successful=3, failed=0)
+    )
+
+
+@pytest.mark.parametrize("stage", ["status", "delivery", "progress", "summary"])
+async def test_batch_does_not_swallow_cancellation(monkeypatch, stage):
+    message = make_message("/batch " + " ".join(URLS[:2]))
+    summary = make_status_message()
+    message.answer.side_effect = [
+        summary,
+        asyncio.CancelledError() if stage == "status" else make_status_message(),
+        make_status_message(),
+    ]
+    deliver = AsyncMock(return_value=True)
+    if stage == "delivery":
+        deliver.side_effect = asyncio.CancelledError
+    if stage == "progress":
+        summary.edit_text.side_effect = asyncio.CancelledError
+    elif stage == "summary":
+        summary.edit_text.side_effect = [None, asyncio.CancelledError()]
+    monkeypatch.setattr(batch, "_download_and_send", deliver)
+
+    with pytest.raises(asyncio.CancelledError):
+        await batch.cmd_batch(message, make_state(), make_db(), Translator("en"))
+
+    assert deliver.await_count == {"status": 0, "delivery": 1, "progress": 1, "summary": 2}[stage]
+    assert message.answer.await_count == (3 if stage == "summary" else 2)
+
+
+@pytest.mark.parametrize("failure", ["statistics", "status_delete", "cache_file_id"])
+async def test_batch_counts_delivered_items_despite_bookkeeping_errors(
+    tmp_path, monkeypatch, failure
+):
+    service = VideoDownloader(str(tmp_path), worker_runner=AsyncMock())
+    for index, url in enumerate(URLS):
+        path = tmp_path / f"{index}.mp4"
+        path.write_bytes(b"cached")
+        service.add_to_cache(url, DownloadResult(success=True, file_path=str(path)))
+    monkeypatch.setattr(download_cmd, "downloader", service)
+    message = make_message("/batch " + " ".join(URLS))
+    summary = make_status_message()
+    statuses = [make_status_message() for _ in URLS]
+    message.answer.side_effect = [summary, *statuses]
+    db = make_db()
+    error = RuntimeError("private bookkeeping detail")
+    if failure == "statistics":
+        db.record_download.side_effect = [None, error, None]
+    elif failure == "status_delete":
+        statuses[1].delete.side_effect = error
+    else:
+        monkeypatch.setattr(
+            service, "set_telegram_file_id", MagicMock(side_effect=[None, error, None])
+        )
+
+    await batch.cmd_batch(message, make_state(), db, Translator("en"))
+
+    assert message.bot.send_video.await_count == 3
+    assert summary.edit_text.await_args.args[0] == Translator("en")(
+        "batch.complete", total=3, successful=3, failed=0
+    )
+    assert db.record_download.await_count == 3
+    assert all(call.kwargs["success"] for call in db.record_download.await_args_list)
+    assert statuses[1].edit_text.await_count == 2
+    assert not service._leases
+
+
+@pytest.mark.parametrize("stage", ["statistics", "status_delete", "cache_file_id"])
+async def test_batch_cancellation_during_bookkeeping_releases_lease(tmp_path, monkeypatch, stage):
+    service = VideoDownloader(str(tmp_path), worker_runner=AsyncMock())
+    path = tmp_path / "cached.mp4"
+    path.write_bytes(b"cached")
+    service.add_to_cache(URLS[0], DownloadResult(success=True, file_path=str(path)))
+    monkeypatch.setattr(download_cmd, "downloader", service)
+    message = make_message("/batch " + " ".join(URLS[:2]))
+    summary, status = make_status_message(), make_status_message()
+    message.answer.side_effect = [summary, status]
+    db = make_db()
+    if stage == "statistics":
+        db.record_download.side_effect = asyncio.CancelledError
+    elif stage == "status_delete":
+        status.delete.side_effect = asyncio.CancelledError
+    else:
+        monkeypatch.setattr(
+            service, "set_telegram_file_id", MagicMock(side_effect=asyncio.CancelledError)
+        )
+
+    with pytest.raises(asyncio.CancelledError):
+        await batch.cmd_batch(message, make_state(), db, Translator("en"))
+
+    assert message.bot.send_video.await_count == 1
+    summary.edit_text.assert_not_awaited()
+    assert not service._leases
+    service._worker_runner.assert_not_awaited()
