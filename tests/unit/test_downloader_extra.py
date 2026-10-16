@@ -341,6 +341,26 @@ def test_http_get_html_success():
     assert result == "<html></html>"
 
 
+def test_http_get_html_sends_navigation_header():
+    """Instagram only returns the media JSON for top-level navigations.
+
+    The request must advertise ``Sec-Fetch-Mode: navigate`` (as yt-dlp does);
+    without it the same URL yields a stripped shell with no product JSON.
+    """
+    fake = MagicMock()
+    fake.headers = {"Content-Type": "text/html"}
+    fake.read = MagicMock(return_value=b"<html></html>")
+    fake.__enter__ = MagicMock(return_value=fake)
+    fake.__exit__ = MagicMock(return_value=False)
+    with (
+        patch("src.services.instagram.urllib.request.Request") as request_cls,
+        patch("src.services.instagram.urllib.request.urlopen", return_value=fake),
+    ):
+        VideoDownloader._http_get_html("https://x")
+    headers = request_cls.call_args.kwargs["headers"]
+    assert headers["Sec-Fetch-Mode"] == "navigate"
+
+
 # ── _fetch_instagram_media_info ─────────────────────────────────────────────
 
 
@@ -474,6 +494,24 @@ def test_instagram_product_photo_carousel_rejects_missing_child_image():
     assert VideoDownloader._instagram_product_to_media_info(product) is None
 
 
+def test_instagram_product_keeps_image_without_known_extension():
+    """image_versions2 entries are stills; never drop a child just because its
+    CDN filename lacks a Telegram-friendly extension (that would flatten the
+    slide count and disable the whole recovery)."""
+    url = "https://scontent.cdninstagram.com/v/t51/photo.heic"
+    product = {
+        "code": "abc",
+        "media_type": 1,
+        "image_versions2": {"candidates": [{"url": url, "width": 1080, "height": 1350}]},
+    }
+
+    result = VideoDownloader._instagram_product_to_media_info(product)
+
+    assert result is not None
+    assert result["image_urls"] == [url]
+    assert result["media_kind"] == "photo"
+
+
 def test_instagram_product_mixed_carousel_is_video_not_photo():
     cover = "https://scontent.cdninstagram.com/v/t51/cover.webp"
     product = {
@@ -582,6 +620,122 @@ def test_fetch_instagram_media_info_ignores_main_page_auxiliary_media(tmp_path):
     assert result["has_video"] is False
     assert result["media_kind"] == "photo"
     assert result["image_urls"] == [target]
+
+
+def _polaris_single_photo(code: str, url: str) -> str:
+    """Logged-out post JSON: a single item wrapped in ``if_not_gated_logged_out``."""
+    return json.dumps(
+        {
+            "__typename": "XIGPolarisImageMedia",
+            "code": code,
+            "if_not_gated_logged_out": {
+                "code": code,
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [{"url": url, "width": 1080, "height": 1920}]
+                },
+            },
+        }
+    )
+
+
+def _polaris_photo_carousel(code: str, urls: list[str]) -> str:
+    """Logged-out post JSON: a carousel exposing ``carousel_media`` at top level."""
+    return json.dumps(
+        {
+            "__typename": "XIGPolarisCarouselMedia",
+            "code": code,
+            "media_type": 8,
+            "carousel_media": [
+                {
+                    "media_type": 1,
+                    "image_versions2": {
+                        "candidates": [{"url": url, "width": 1080, "height": 1350}]
+                    },
+                }
+                for url in urls
+            ],
+        }
+    )
+
+
+def test_instagram_target_product_media_unwraps_logged_out_wrapper():
+    payload = _polaris_single_photo(
+        "abc", "https://scontent.cdninstagram.com/v/t51/photo.jpg"
+    )
+    info = VideoDownloader._instagram_target_product_media(payload)
+    assert info is not None
+    assert info["media_kind"] == "photo"
+    assert info["has_video"] is False
+    assert info["image_urls"] == ["https://scontent.cdninstagram.com/v/t51/photo.jpg"]
+
+
+def test_instagram_target_product_media_rejects_non_json():
+    assert VideoDownloader._instagram_target_product_media(None) is None
+    assert VideoDownloader._instagram_target_product_media("not json") is None
+
+
+def test_fetch_instagram_media_info_target_payload_beats_stray_video_marker(tmp_path):
+    """The requested post's own JSON decides the media kind.
+
+    The post is a single photo, but the surrounding page JSON also carries an
+    unrelated ``media_type: 2`` entry (recommendations). The structured target
+    payload must win, so the photo is not misreported as a video.
+    """
+    d = make_d(tmp_path)
+    photo = "https://scontent.cdninstagram.com/v/t51/photo.jpg"
+    main_html = json.dumps(
+        {
+            "code": "abc",
+            "if_not_gated_logged_out": {
+                "code": "abc",
+                "media_type": 1,
+                "image_versions2": {
+                    "candidates": [{"url": photo, "width": 1080, "height": 1920}]
+                },
+            },
+            "recommendations": [
+                {"media_type": 2, "video_versions": [{"url": "https://cdn/x.mp4"}]}
+            ],
+        }
+    )
+
+    def fake_get(candidate, **_kwargs):
+        if "/embed" in candidate:
+            return None
+        if urlparse(candidate).hostname == "www.instagram.com":
+            return main_html
+        return None
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result is not None
+    assert result["has_video"] is False
+    assert result["media_kind"] == "photo"
+    assert photo in result["image_urls"]
+
+
+def test_fetch_instagram_media_info_target_payload_carousel_keeps_order(tmp_path):
+    d = make_d(tmp_path)
+    first = "https://scontent.cdninstagram.com/v/t51/a.jpg"
+    second = "https://scontent.cdninstagram.com/v/t51/b.jpg"
+    main_html = _polaris_photo_carousel("abc", [first, second])
+
+    def fake_get(candidate, **_kwargs):
+        if "/embed" in candidate:
+            return None
+        if urlparse(candidate).hostname == "www.instagram.com":
+            return main_html
+        return None
+
+    with patch.object(d, "_http_get_html", side_effect=fake_get):
+        result = d._fetch_instagram_media_info("https://www.instagram.com/p/abc/")
+
+    assert result is not None
+    assert result["media_kind"] == "photo"
+    assert result["has_video"] is False
+    assert result["image_urls"] == [first, second]
 
 
 def test_fetch_instagram_media_info_aggregates_multiple_endpoints(tmp_path):
@@ -1212,19 +1366,63 @@ def test_try_instagram_photo_reel_product_video_never_downloads_cover(tmp_path):
     download_image.assert_not_called()
 
 
-def test_try_instagram_photo_reel_without_product_does_not_trust_html_cover(tmp_path):
+def test_try_instagram_photo_reel_scrapes_shortcode_embed_without_product(tmp_path):
+    """A /reel/ photo post is recovered from the shortcode-scoped embed even
+    when the authenticated product API returns nothing."""
     d = make_d(tmp_path)
-    cookie_jar = MagicMock()
+    cover = '<meta property="og:image" content="https://scontent.cdninstagram.com/v/t51/photo.jpg">'
+
+    def fake_get(candidate, **_kwargs):
+        # A reel share link is probed through the scoped embed/mirror only; the
+        # raw main page is never consulted.
+        assert "/embed" in candidate or "kkinstagram" in candidate, candidate
+        return cover + '{"media_type": 1}'
 
     with (
-        patch.object(d, "_load_instagram_cookie_jar", return_value=cookie_jar),
+        patch.object(d, "_load_instagram_cookie_jar", return_value=MagicMock()),
         patch.object(d, "_fetch_instagram_product_info", return_value=None),
-        patch.object(d, "_http_get_html") as get_html,
+        patch.object(d, "_download_image_sync", return_value=str(fake_file(tmp_path, "reel.jpg"))),
+        patch.object(d, "_http_get_html", side_effect=fake_get),
+    ):
+        result = d._try_instagram_photo("https://www.instagram.com/reel/unknown/")
+
+    assert result is not None
+    assert result.is_photo
+    assert result.media_type_confirmed
+
+
+def test_try_instagram_photo_reel_bare_cover_stays_unconfirmed(tmp_path):
+    """A reel embed without a photo marker yields an unconfirmed result, so the
+    caller keeps the video error instead of leaking a square cover."""
+    d = make_d(tmp_path)
+    cover = '<meta property="og:image" content="https://scontent.cdninstagram.com/v/t51/cover.jpg">'
+    with (
+        patch.object(d, "_load_instagram_cookie_jar", return_value=MagicMock()),
+        patch.object(d, "_fetch_instagram_product_info", return_value=None),
+        patch.object(d, "_download_image_sync", return_value=str(fake_file(tmp_path, "cover.jpg"))),
+        patch.object(d, "_http_get_html", return_value=cover) as get_html,
+    ):
+        result = d._try_instagram_photo("https://www.instagram.com/reel/unknown/")
+
+    get_html.assert_called()
+    assert result is not None
+    assert result.media_type_confirmed is False
+
+
+def test_try_instagram_photo_reel_video_marker_is_never_a_photo(tmp_path):
+    d = make_d(tmp_path)
+    cover = '<meta property="og:image" content="https://scontent.cdninstagram.com/v/t51/cover.jpg">'
+    html = cover + '{"media_type":2,"video_versions":[{"url":"https://cdn/v.mp4"}]}'
+    with (
+        patch.object(d, "_load_instagram_cookie_jar", return_value=MagicMock()),
+        patch.object(d, "_fetch_instagram_product_info", return_value=None),
+        patch.object(d, "_download_image_sync") as download_image,
+        patch.object(d, "_http_get_html", return_value=html),
     ):
         result = d._try_instagram_photo("https://www.instagram.com/reel/unknown/")
 
     assert result is None
-    get_html.assert_not_called()
+    download_image.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1300,6 +1498,63 @@ async def test_instagram_no_formats_has_structured_error_without_exact_product(t
     assert not result.success
     assert result.error_code == "downloader.error.instagram_no_formats"
     photo_probe.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_download_reel_photo_recovers_from_scoped_embed_without_cookies(tmp_path):
+    """End-to-end: a cookie-less /reel/ photo post is recovered anonymously."""
+    d = make_d(tmp_path)
+    photo = fake_file(tmp_path, "reel-photo.jpg")
+    embed_html = (
+        '<meta property="og:image" '
+        'content="https://scontent.cdninstagram.com/v/t51/reel.jpg">'
+        '{"media_type": 1}'
+    )
+    with (
+        patch.object(d, "_load_instagram_cookie_jar", return_value=None),
+        patch.object(d, "_http_get_html", return_value=embed_html),
+        patch.object(d, "_download_image_sync", return_value=str(photo)),
+        patch.object(
+            d,
+            "_download_sync",
+            return_value=DownloadResult(
+                success=False, error_code="downloader.error.instagram_no_formats"
+            ),
+        ),
+    ):
+        result = await d.download("https://www.instagram.com/reel/reel-photo/")
+
+    assert result.success
+    assert result.is_photo
+    assert result.media_type_confirmed
+
+
+@pytest.mark.asyncio
+async def test_download_reel_unconfirmed_photo_files_are_discarded(tmp_path):
+    d = make_d(tmp_path)
+    cover = fake_file(tmp_path, "cover.jpg")
+    unconfirmed = DownloadResult(
+        success=True,
+        file_path=str(cover),
+        is_photo=True,
+        photo_paths=[str(cover)],
+        media_type_confirmed=False,
+    )
+    with (
+        patch.object(d, "_try_instagram_photo", return_value=unconfirmed),
+        patch.object(
+            d,
+            "_download_sync",
+            return_value=DownloadResult(
+                success=False, error_code="downloader.error.instagram_no_formats"
+            ),
+        ),
+    ):
+        result = await d.download("https://www.instagram.com/reel/unknown/")
+
+    assert not result.success
+    assert result.error_code == "downloader.error.instagram_no_formats"
+    assert not cover.exists()
 
 
 @pytest.mark.asyncio

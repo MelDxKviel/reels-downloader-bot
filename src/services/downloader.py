@@ -257,6 +257,10 @@ class VideoDownloader(
                 )
                 if exact_photo is not None and exact_photo.media_type_confirmed:
                     return exact_photo
+                # A reel share link can expose a bare cover without a photo
+                # marker; the scrape is discarded, so its files must not leak.
+                if exact_photo is not None:
+                    self.discard_result_files(exact_photo)
             return result
         except Exception as e:
             msg = str(e)
